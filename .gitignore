@@ -1,0 +1,7 @@
+# Upstream clones: each is its own git repo
+/inc_diagnostics/
+/reference_integration/
+/score/
+
+# Build logs
+*.log
