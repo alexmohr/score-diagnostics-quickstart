@@ -2,7 +2,8 @@
 # CDA ECU simulator, to test a build with a running classic diagnostic adapter (CDA).
 #
 #   ./ecu-sim.sh up      build and start the ECU simulator (DoIP/UDS ECUs, control API on 127.0.0.1:8181)
-#   ./ecu-sim.sh test    run the CDA from the last build-pi output against the simulator and query it over SOVD
+#   ./ecu-sim.sh test    run the gateway and the CDA from the last build-pi output against the simulator
+#                        and read the VIN of an ECU through the gateway over SOVD
 #   ./ecu-sim.sh down    stop and remove everything this script started
 #
 # The simulator, its ECU databases (MDD) and the CDA configuration come from the
@@ -17,6 +18,7 @@ SRC="$OUT/cda-src"
 NET="score-ecu-sim"
 SIM="score-ecu-sim"
 CDA="score-cda"
+GATEWAY="score-gateway"
 SIM_IMAGE="score-cda-ecu-sim"
 PLATFORM_TAR="$OUT/score-platform-linux-aarch64.tar"
 CDA_URL="https://github.com/eclipse-opensovd/classic-diagnostic-adapter.git"
@@ -78,12 +80,14 @@ cda_test() {
   local work="$OUT/cda-run"
   rm -rf "$work"
   mkdir -p "$work/databases"
-  tar -xf "$PLATFORM_TAR" -C "$work" '*usr/bin/diagnostics/opensovd-cda'
-  local bin
-  bin="$(find "$work" -name opensovd-cda -type f | head -1)"
-  [[ -n "$bin" ]] || { echo "opensovd-cda is not in $PLATFORM_TAR" >&2; exit 1; }
-  [[ "$(od -An -tx1 -j18 -N2 "$bin" | tr -d ' ')" == "b700" ]] || { echo "$bin is not an aarch64 binary" >&2; exit 1; }
-  cp "$bin" "$work/opensovd-cda"
+  tar -xf "$PLATFORM_TAR" -C "$work" '*usr/bin/diagnostics/opensovd-cda' '*usr/bin/diagnostics/opensovd-gateway'
+  local name bin
+  for name in opensovd-cda opensovd-gateway; do
+    bin="$(find "$work" -name "$name" -type f | head -1)"
+    [[ -n "$bin" ]] || { echo "$name is not in $PLATFORM_TAR" >&2; exit 1; }
+    [[ "$(od -An -tx1 -j18 -N2 "$bin" | tr -d ' ')" == "b700" ]] || { echo "$bin is not an aarch64 binary" >&2; exit 1; }
+    cp "$bin" "$work/$name"
+  done
   cp "$SRC"/testcontainer/odx/*.mdd "$work/databases/"
   cat > "$work/opensovd-cda.toml" <<'EOF'
 [server]
@@ -101,26 +105,38 @@ EOF
   docker rm -f "$CDA" >/dev/null 2>&1 || true
   # An arm64 container runs the aarch64 binary natively on Apple Silicon. The tester address is
   # the container's own address, as in the CDA's own test image.
-  docker run -d --name "$CDA" --platform linux/arm64 --network "$NET" -p 127.0.0.1:20002:20002 \
+  docker run -d --name "$CDA" --platform linux/arm64 --network "$NET" \
     -v "$work":/app:ro -e CDA_CONFIG_FILE=/app/opensovd-cda.toml debian:bookworm-slim \
     sh -c 'exec /app/opensovd-cda --tester-address "$(hostname -i | cut -d" " -f1)"' >/dev/null
-  wait_for 60 "the CDA" curl -sf -o /dev/null http://127.0.0.1:20002/health/ready || { docker logs --tail 40 "$CDA"; exit 1; }
+  # The CDA is not published on the host: it is reached only through the gateway, which also issues the tokens.
 
-  local base=http://127.0.0.1:20002/vehicle/v15 token components vin
+  # The gateway in front of the CDA: it forwards what it does not hold to the CDA (--upstream-url).
+  docker rm -f "$GATEWAY" >/dev/null 2>&1 || true
+  docker run -d --name "$GATEWAY" --platform linux/arm64 --network "$NET" -p 127.0.0.1:7690:7690 \
+    -v "$work":/app:ro debian:bookworm-slim /app/opensovd-gateway --url http://0.0.0.0:7690/sovd \
+    --upstream-url "http://$CDA:20002/vehicle/v15" --upstream-authorize-url "http://$CDA:20002/vehicle/v15" >/dev/null
+  local base=http://127.0.0.1:7690/sovd/v1 token components vin
+  wait_for 60 "the gateway and the CDA behind it" curl -sf -o /dev/null -X POST "$base/authorize" -H 'Content-Type: application/json' -d '{"client_id":"test","client_secret":"test"}' || { docker logs --tail 40 "$GATEWAY"; exit 1; }
   token="$(curl -sf -X POST "$base/authorize" -H 'Content-Type: application/json' \
     -d '{"client_id":"test","client_secret":"test"}' | sed -E 's/.*"access_token" *: *"([^"]+)".*/\1/')"
+  [[ -n "$token" ]] || { echo "no token from the gateway" >&2; docker logs --tail 40 "$GATEWAY"; exit 1; }
   # The ECUs are found by DoIP broadcast, so give the CDA a moment.
   wait_for 60 "the simulated ECUs" bash -c "curl -sf '$base/components' -H 'Authorization: Bearer $token' | grep -q flxc1000"
   components="$(curl -sf "$base/components" -H "Authorization: Bearer $token")"
-  echo "components: $components"
-  vin="$(curl -sf "$base/components/flxc1000/data/VINDataIdentifier" -H "Authorization: Bearer $token")"
+  echo "components (through the gateway): $components"
+  # A component is listed before the CDA has detected the variant of its ECU, so retry the read.
+  vin=""
+  for _ in $(seq 1 30); do
+    vin="$(curl -sf "$base/components/flxc1000/data/VINDataIdentifier" -H "Authorization: Bearer $token")" && break
+    sleep 1
+  done
   echo "VIN:        $vin"
   grep -q SCEDT26T8BD005261 <<<"$vin" || { echo "unexpected VIN" >&2; docker logs --tail 40 "$CDA"; exit 1; }
-  echo "OK: the CDA from the platform package read the VIN of a simulated ECU"
+  echo "OK: the gateway forwarded to the CDA, which read the VIN of a simulated ECU"
 }
 
 down() {
-  docker rm -f "$CDA" "$SIM" >/dev/null 2>&1 || true
+  docker rm -f "$GATEWAY" "$CDA" "$SIM" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 
