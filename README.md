@@ -17,7 +17,7 @@ Clone with `git clone --recurse-submodules`. The submodules are pinned to commit
 ## Commands
 
 ```sh
-./dev.sh build-pi     # Raspberry Pi packages -> out/score-platform-linux-aarch64.tar, out/score-showcases-linux-aarch64.tar
+./dev.sh build-pi     # S-CORE image for the Raspberry Pi 4B -> out/score-image-rpi4b.wic (flash it to an SD card)
 ./dev.sh build-qemu   # QEMU image (EB corbos Linux for Safety Applications, aarch64), ~30 min the first time
 ./dev.sh run-qemu     # boot it as a host on the Docker network of the simulator; ssh root@172.42.1.100 (no password)
 ```
@@ -33,7 +33,7 @@ The diagnostics end up in `/usr/bin/diagnostics/` (`opensovd-gateway`, `opensovd
 
 The simulator, its ECU databases and the ECU settings come from the CDA commit that `inc_diagnostics` pins. The VM of `run-qemu` is a host on the simulator's network at `172.42.1.100`: nothing of it is published on the host, the gateway listens on that address (port 7690) and the CDA only on the loopback address of the VM. `test` runs the aarch64 binaries natively in arm64 containers, so it needs `./dev.sh build-pi` first. The gateway has no `/authorize` yet, so the tests send a fixed development token.
 
-For the Pi, install the two tars on Raspberry Pi OS Lite (64-bit) as described in `reference_integration/deploy/README.md`.
+The Pi image is built like the QEMU image: the EB corbos toolkit image for the Raspberry Pi 4B with the platform, the showcases and the diagnostics service deployed in it (`//images/ebclfsa_rpi4b:image` in `reference_integration`), so it starts the stack at boot as well. It is for integration tests, not production: root can log in over ssh without a password.
 
 ## How it builds
 

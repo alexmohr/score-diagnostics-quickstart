@@ -14,8 +14,9 @@ usage() {
   cat <<'HELP'
 Usage: ./dev.sh <command>
 
-  build-pi     build the Raspberry Pi packages (platform and showcases, with the diagnostics)
-               into out/
+  build-pi     build the S-CORE image for the Raspberry Pi 4B, out/score-image-rpi4b.wic: the EB corbos
+               image of the toolkit with the platform, the showcases and the diagnostics service
+               deployed in it, like the QEMU image. Flash it to an SD card.
   build-qemu   build the QEMU image (EB corbos Linux for Safety Applications, aarch64)
   run-qemu     boot the QEMU image; log in as root over ssh, without a password
 
@@ -87,12 +88,15 @@ case "${1:-}" in
   build-pi)
     sync_source
     mkdir -p "$OUT_DIR"
+    # The image is built like the QEMU image. The packages are also left in out/ for ecu-sim.sh test.
     docker_run -v "$OUT_DIR":/out -- bash -c '
       set -e
       bazel build --config=linux-aarch64 //deploy:platform_tar //showcases:showcases_pkg_tar
       cp -L bazel-bin/deploy/platform_tar.tar /out/score-platform-linux-aarch64.tar
-      cp -L bazel-bin/showcases/showcases_pkg_tar.tar /out/score-showcases-linux-aarch64.tar'
-    echo "Raspberry Pi packages: $OUT_DIR"
+      cp -L bazel-bin/showcases/showcases_pkg_tar.tar /out/score-showcases-linux-aarch64.tar
+      bazel build --config=eb-aarch64 //images/ebclfsa_rpi4b:image
+      cp -L bazel-bin/images/ebclfsa_rpi4b/build/ebcl-rpi4b-deployed/fastdev-trixie-ebclfsa-rpi4b.wic /out/score-image-rpi4b.wic'
+    echo "Raspberry Pi 4B image: $OUT_DIR/score-image-rpi4b.wic"
     ;;
   build-qemu)
     sync_source
