@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# CDA ECU simulator, to test a build with a running classic diagnostic adapter (CDA).
-#
-#   ./ecu-sim.sh up      build and start the ECU simulator (DoIP/UDS ECUs, control API on 127.0.0.1:8181)
-#   ./ecu-sim.sh test    run the gateway and the CDA from the last build-pi output against the simulator
-#                        and read the VIN of an ECU through the gateway over SOVD
-#   ./ecu-sim.sh down    stop and remove everything this script started
-#
-# The simulator, its ECU databases (MDD) and the CDA configuration come from the
-# eclipse-opensovd/classic-diagnostic-adapter commit that inc_diagnostics pins, so they match
-# the CDA in the image. Everything runs on the Docker network "score-ecu-sim" (172.42.0.0/16),
-# because the CDA finds the simulated ECUs by DoIP broadcast and that needs one layer-2 network.
+# CDA ECU simulator: ./ecu-sim.sh help
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,9 +11,35 @@ CDA="score-cda"
 GATEWAY="score-gateway"
 SIM_IMAGE="score-cda-ecu-sim"
 PLATFORM_TAR="$OUT/score-platform-linux-aarch64.tar"
+VM_IP=172.42.1.100  # address of the QEMU VM of ./dev.sh run-qemu on the network of the simulator
+# The gateway has no /authorize yet (it answers 404), so no client can get a token. The CDA runs in its
+# development mode and accepts any well-formed JWT with sub and exp; this is one. Replace it by the
+# token of the gateway as soon as the gateway issues tokens.
+DEV_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoyMDAwMDAwMDAwfQ.Q0IP5df7FxVEvVDF2v6soF8uh-j_qA-D_tgYTb3ur3g"
 CDA_URL="https://github.com/eclipse-opensovd/classic-diagnostic-adapter.git"
 
-usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() {
+  cat <<'HELP'
+Usage: ./ecu-sim.sh <command>
+
+  up     build and start the ECU simulator of the classic diagnostic adapter (CDA), control API on
+         127.0.0.1:8181, on the Docker network score-ecu-sim (172.42.0.0/16)
+  test   run the gateway and the CDA of the last ./dev.sh build-pi in containers on that network and
+         read the VIN of the ECU flxc1000 through the gateway (127.0.0.1:7690). The CDA is only
+         reachable through the gateway. This does not use the QEMU image.
+  test-vm
+         with the VM of ./dev.sh run-qemu running on the same network: start the CDA and the gateway
+         of the image in it and read the same VIN through the gateway of the VM (172.42.1.100:7690),
+         from a container on the network. The CDA must not be reachable directly.
+  down   stop and remove everything this script started
+
+The simulator, its ECU databases and the settings that its ECUs need come from the CDA commit that
+inc_diagnostics pins. The CDA finds the simulated ECUs by DoIP broadcast, which needs one layer-2
+network. The gateway has no /authorize yet, so the tests send a fixed development token, which the CDA
+accepts in its development mode.
+HELP
+  exit "${1:-0}"
+}
 
 # The CDA commit that inc_diagnostics uses (git_override in its MODULE.bazel).
 cda_commit() {
@@ -89,21 +105,26 @@ cda_test() {
     cp "$bin" "$work/$name"
   done
   cp "$SRC"/testcontainer/odx/*.mdd "$work/databases/"
-  cat > "$work/opensovd-cda.toml" <<'EOF'
-[server]
-address = "0.0.0.0"
-port = 20002
+  # The paths and the address of this run, and the settings of the ECUs of the simulator that its ECUs need.
+  mkdir -p "$work/flash"
+  {
+    cat <<'TOML'
+flash_files_path = "/app/flash"
 
 [database]
 dir = "/app/databases"
 exit_no_database_loaded = true
 
-[doip]
-tester_subnet = "255.255.0.0"
-EOF
+[server]
+address = "0.0.0.0"
+port = 20002
+
+TOML
+    cat "$ROOT/inc_diagnostics/score/opensovd-cda/cda-ecu-sim.toml"
+  } > "$work/opensovd-cda.toml"
 
   docker rm -f "$CDA" >/dev/null 2>&1 || true
-  # An arm64 container runs the aarch64 binary natively on Apple Silicon. The tester address is
+  # A linux/arm64 container runs the aarch64 binary natively on an arm64 host. The tester address is
   # the container's own address, as in the CDA's own test image.
   docker run -d --name "$CDA" --platform linux/arm64 --network "$NET" \
     -v "$work":/app:ro -e CDA_CONFIG_FILE=/app/opensovd-cda.toml debian:bookworm-slim \
@@ -117,10 +138,7 @@ EOF
     -v "$work":/app:ro debian:bookworm-slim /app/opensovd-gateway >/dev/null
   local base=http://127.0.0.1:7690/sovd/v1 token components vin
   wait_for 60 "the gateway and the CDA behind it" bash -c "curl -sf '$base/apps' | grep -q sovd2uds" || { docker logs --tail 40 "$GATEWAY"; exit 1; }
-  # The gateway has no /authorize yet (it answers 404), so no client can get a token. The CDA here runs
-  # in its development mode and accepts any well-formed JWT with sub and exp; this is one. Replace it
-  # by the token of the gateway as soon as the gateway issues tokens.
-  token="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoyMDAwMDAwMDAwfQ.Q0IP5df7FxVEvVDF2v6soF8uh-j_qA-D_tgYTb3ur3g"
+  token="$DEV_TOKEN"
   # The ECUs are found by DoIP broadcast, so give the CDA a moment.
   wait_for 60 "the simulated ECUs" bash -c "curl -sf '$base/components' -H 'Authorization: Bearer $token' | grep -q flxc1000"
   components="$(curl -sf "$base/components" -H "Authorization: Bearer $token")"
@@ -136,6 +154,33 @@ EOF
   echo "OK: the gateway forwarded to the CDA, which read the VIN of a simulated ECU"
 }
 
+# The OpenSOVD stack of the image: starts the CDA and the gateway in the VM of ./dev.sh run-qemu and
+# reads the VIN of an ECU of the simulator through the gateway, from a container on the network.
+vm_test() {
+  local image="${SCORE_DEV_IMAGE:-score-dev:aarch64-sim}" base="http://$VM_IP:7690/sovd/v1" vin
+  docker image inspect "$image" >/dev/null 2>&1 || { echo "run ./dev.sh build-qemu first ($image is its devcontainer)" >&2; exit 1; }
+  docker inspect -f '{{.State.Running}}' "$SIM" 2>/dev/null | grep -q true || { echo "run ./ecu-sim.sh up first" >&2; exit 1; }
+  on_net() { docker run --rm -i --platform linux/amd64 --network "$NET" "$image" "$@"; }
+  echo "waiting for the VM on $VM_IP (start it with ./dev.sh run-qemu)"
+  wait_for 1800 "the VM" on_net bash -c "exec 3<>/dev/tcp/$VM_IP/22"
+  # The launch manager of the showcase starts the CDA, which listens on the loopback address of the
+  # VM, and then the gateway, which listens on all addresses: clients use the gateway.
+  on_net ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "root@$VM_IP" "
+    killall launch_manager opensovd-cda opensovd-gateway 2>/dev/null
+    cd /showcases/data/diagnostics && (nohup /usr/bin/launch_manager >/tmp/launch_manager.log 2>&1 &)"
+  # The ECUs are found by DoIP broadcast from the VM, so give the CDA a moment.
+  wait_for 120 "the simulated ECUs through the gateway in the VM" on_net bash -c "curl -sf '$base/components' | grep -q flxc1000"
+  echo "components (through the gateway in the VM): $(on_net curl -sf "$base/components")"
+  for _ in $(seq 1 30); do
+    vin="$(on_net curl -sf "$base/components/flxc1000/data/VINDataIdentifier" -H "Authorization: Bearer $DEV_TOKEN")" && break
+    sleep 2
+  done
+  echo "VIN:        $vin"
+  grep -q SCEDT26T8BD005261 <<<"$vin" || { echo "unexpected VIN" >&2; exit 1; }
+  if on_net curl -s -m 4 -o /dev/null "http://$VM_IP:20002/health/ready"; then echo "the CDA is reachable directly, it must not be" >&2; exit 1; fi
+  echo "OK: the gateway in the image reached the CDA in the image, which read the VIN of a simulated ECU; the CDA is not reachable directly"
+}
+
 down() {
   docker rm -f "$GATEWAY" "$CDA" "$SIM" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
@@ -144,6 +189,7 @@ down() {
 case "${1:-}" in
   up) sim_up ;;
   test) cda_test ;;
+  test-vm) vm_test ;;
   down) down ;;
   -h|--help|help) usage 0 ;;
   *) usage 2 ;;
