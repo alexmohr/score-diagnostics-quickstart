@@ -4,11 +4,12 @@
 # the VM finds the simulated ECUs by DoIP broadcast.
 #
 # The container's eth0 and a tap device of the VM are joined in a bridge. The image configures its
-# network statically (192.168.7.2/24, gateway 192.168.7.1), so the bridge also gets 192.168.7.1,
-# and once the VM answers on 192.168.7.2 that address is replaced by the one on the simulator's
-# network (VM_IP) by ssh. Nothing of the VM is forwarded or published: it is reached by that address. The
-# VM runs the same kernel and disk as "bazel run //images/ebclfsa_aarch64:run", with the same
-# options except for the network.
+# network statically (192.168.7.2/24, for QEMU's user networking), so the address on the simulator's
+# network (VM_IP) is written into the copy of the disk that QEMU uses: the VM has it from the first
+# second, which matters because the CDA broadcasts once, from the address that the host picks when
+# it starts. Nothing of the VM is forwarded or published: it is reached by that address. The VM runs
+# the same kernel and disk as "bazel run //images/ebclfsa_aarch64:run", with the same options except
+# for the network.
 set -euo pipefail
 
 VM_IP="${VM_IP:-172.42.1.100}"
@@ -24,8 +25,17 @@ image="bazel-bin/$(grep '\.wic$' <<<"$files" | sed 's#^bazel-out/[^/]*/bin/##')"
 # QEMU writes to the disk, the build output stays as it is.
 cp --sparse=always "$image" /tmp/vm.wic
 
-addr="$(ip -4 -o addr show dev eth0 | awk '{print $4}')"
 gateway="$(ip route | awk '/^default/ {print $3}')"
+# The root file system is the first partition of the disk.
+rootfs="/tmp/vm.wic?offset=$(python3 -c 'import struct,sys; m=open(sys.argv[1],"rb").read(512); print(struct.unpack("<I", m[454:458])[0]*512)' /tmp/vm.wic)"
+debugfs -R "cat /etc/config/network" "$rootfs" 2>/dev/null \
+  | sed -e "s#192.168.7.2/24#$VM_IP/16#" -e "s#192.168.7.1#$gateway#" > /tmp/vm-network
+grep -q "$VM_IP/16" /tmp/vm-network || { echo "cannot set the address of the VM in /etc/config/network" >&2; exit 1; }
+debugfs -w -R "rm /etc/config/network" "$rootfs" >/dev/null 2>&1
+debugfs -w -R "write /tmp/vm-network /etc/config/network" "$rootfs" >/dev/null 2>&1
+debugfs -R "cat /etc/config/network" "$rootfs" 2>/dev/null | grep -q "$VM_IP/16" || { echo "the address of the VM was not written" >&2; exit 1; }
+
+addr="$(ip -4 -o addr show dev eth0 | awk '{print $4}')"
 ip link add br0 type bridge
 ip link set br0 up
 ip tuntap add tap0 mode tap
@@ -33,23 +43,11 @@ ip link set tap0 master br0 up
 ip addr flush dev eth0
 ip link set eth0 master br0
 ip addr add "$addr" dev br0
-ip addr add 192.168.7.1/24 dev br0
 ip route add default via "$gateway"
 # The Docker network reflects flooded frames to the sender, so the bridge would learn the MAC of
 # the VM on eth0 and send its traffic out of the container instead of to tap0.
 bridge fdb replace "$VM_MAC" dev tap0 master static sticky
 bridge link set dev eth0 learning off
-
-# Replace the address that the image configures by the address on the network of the simulator, as
-# soon as the VM answers on the former. The CDA broadcasts from the address that the host picks, so
-# the VM must have no other address.
-(
-  ssh_opts=(-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
-  until ssh "${ssh_opts[@]}" root@192.168.7.2 "ip addr add $VM_IP/16 dev br0" 2>/dev/null; do sleep 5; done
-  ssh "${ssh_opts[@]}" "root@$VM_IP" "ip addr del 192.168.7.2/24 dev br0"
-  ip addr del 192.168.7.1/24 dev br0
-  echo "VM is reachable on $VM_IP"
-) &
 
 echo "VM address $VM_IP on the network of the container ($addr)"
 exec qemu-system-aarch64 \
