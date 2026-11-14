@@ -6,13 +6,13 @@ Eclipse S-CORE with the diagnostics stack (OpenSOVD gateway and classic diagnost
 
 | Path | What it is |
 |---|---|
-| `reference_integration/` | S-CORE integration. Submodule, on branch `feat/add-diagnostics` ([PR #482](https://github.com/eclipse-score/reference_integration/pull/482), draft), which deploys the diagnostics with the platform. |
-| `inc_diagnostics/` | Diagnostics stack. Submodule, on branch `consumable_by_reference_integration` ([PR #70](https://github.com/eclipse-score/inc_diagnostics/pull/70), draft), which makes it consumable by other Bazel modules. |
+| `reference_integration/` | S-CORE integration. Submodule, pinned to a commit of [PR #482](https://github.com/eclipse-score/reference_integration/pull/482) (draft), which deploys the diagnostics with the platform. |
+| `inc_diagnostics/` | Diagnostics stack. Submodule, pinned to a commit of [PR #70](https://github.com/eclipse-score/inc_diagnostics/pull/70) (draft), which makes it consumable by other Bazel modules. |
 | `score/` | Docs and process repo. Nothing to build. |
 | `dev.sh` | The three build and run commands (below). |
 | `ecu-sim.sh` | Starts the CDA's ECU simulator and tests the built CDA against it (below). |
 
-Clone with `git clone --recurse-submodules`. The submodule pins decide what gets built.
+Clone with `git clone --recurse-submodules`. The submodules are pinned to commits, never to a branch, and the pins decide what gets built. Update a pin by checking out the new commit in the submodule and committing it here.
 
 ## Commands
 

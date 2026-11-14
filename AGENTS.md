@@ -4,9 +4,11 @@ Guidance for coding agents working in this workspace. See `README.md` for the ov
 
 ## Layout
 
+- Pin every dependency to a revision (commit hash), never to a branch name or HEAD: submodules, `git_override`s, `known_good.json`. `.gitmodules` therefore has no `branch` setting.
+
 - The workspace root is a git repo. `reference_integration/`, `inc_diagnostics/` and `score/` are git submodules of the upstream `eclipse-score` repos. Run git commands inside the repo you are changing.
-- `reference_integration/` is pinned to branch `feat/add-diagnostics` (draft PR eclipse-score/reference_integration#482). It deploys the OpenSOVD gateway and CDA from `inc_diagnostics` through `//deploy/diagnostics`, and adds them to `//deploy:platform_tar` only (QNX consumes `platform_bundle`).
-- `inc_diagnostics/` is pinned to branch `consumable_by_reference_integration` (draft PR eclipse-score/inc_diagnostics#70). It is a Bazel module `score_diagnostics`; the source of truth for the diagnostics code.
+- `reference_integration/` is pinned to a commit of the draft PR eclipse-score/reference_integration#482. It deploys the OpenSOVD gateway and CDA from `inc_diagnostics` through `//deploy/diagnostics`, and adds them to `//deploy:platform_tar` only (QNX consumes `platform_bundle`).
+- `inc_diagnostics/` is pinned to a commit of the draft PR eclipse-score/inc_diagnostics#70. It is a Bazel module `score_diagnostics`; the source of truth for the diagnostics code.
 - `reference_integration/` cannot be checked out completely on macOS (case collision between `BUILD` and `build/`). The host checkout is therefore incomplete. Build and edit it from the clone in the Docker volume `score-ref-int`, not from this directory.
 - `score/` is docs only.
 
