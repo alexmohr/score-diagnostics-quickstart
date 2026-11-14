@@ -1,59 +1,92 @@
 #!/usr/bin/env bash
-# Run commands inside the S-CORE devcontainer (linux/amd64) + QEMU helpers.
+# S-CORE build helper. Builds run in the official devcontainer (linux/amd64) because the
+# hermetic toolchains are x86_64-Linux only.
 #
-# The hermetic S-CORE toolchains (GCC 12.2, Ferrocene) are x86_64-Linux hosted, so on an
-# Apple Silicon Mac the container must run as linux/amd64 (emulated). Targets are
-# cross-compiled for Raspberry Pi (aarch64) from there.
+#   ./dev.sh build-pi      build the Raspberry Pi packages (platform + showcases, incl. diagnostics)
+#   ./dev.sh build-qemu    build the QEMU image (EB corbos Linux for Safety Applications, aarch64)
+#   ./dev.sh run-qemu      boot the QEMU image (SSH on 127.0.0.1:2222, login root/linux)
 #
-# Usage:
-#   ./dev.sh                       interactive shell in inc_diagnostics/
-#   ./dev.sh <repo> <cmd...>       run a command in <repo> (inc_diagnostics | reference_integration | score)
-#   ./dev.sh pi [bazel args]       cross-build inc_diagnostics for Raspberry Pi (aarch64)
-#   ./dev.sh qemu <bazel-bin path> [args]
-#                                  run an aarch64 binary from the pi build under qemu-user
-#                                  e.g. ./dev.sh qemu score/mw/diag/future_test
-#   ./dev.sh qemu-test             run every aarch64 unit test of inc_diagnostics under qemu-user
+# reference_integration is built from a clone inside the Docker volume "score-ref-int",
+# because the repository cannot be checked out completely on a case-insensitive macOS
+# volume. The clone follows the commit that the reference_integration submodule points to.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_IMAGE="${SCORE_DEVCONTAINER_IMAGE:-ghcr.io/eclipse-score/devcontainer:v1.12.0}"
-IMAGE="score-dev:local"
+IMAGE="score-dev:aarch64-headers"
+SRC_VOL="${SCORE_SOURCE_VOLUME:-score-ref-int}"
 CACHE_VOL="${SCORE_BAZEL_CACHE_VOLUME:-score-bazel-cache}"
-CFG=score_diag_aarch64_linux
+OUT_DIR="$ROOT/out"
 
+usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# The devcontainer plus the aarch64 glibc headers that the iceoryx2 bindgen step needs
+# when cross-compiling for Raspberry Pi (see the reference_integration README).
 ensure_image() {
   docker image inspect "$IMAGE" >/dev/null 2>&1 && return
-  docker build --platform linux/amd64 --build-arg BASE="$BASE_IMAGE" -t "$IMAGE" "$ROOT"
+  docker build -q --platform linux/amd64 -t "$IMAGE" - <<EOF
+FROM --platform=linux/amd64 $BASE_IMAGE
+RUN apt-get update -qq \\
+ && apt-get install -y -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \\
+ && rm -rf /var/lib/apt/lists/*
+EOF
 }
 
-run() {
-  local workdir="$1"; shift
+docker_run() {  # docker_run <extra docker args...> -- <command...>
+  local extra=()
+  while [[ $# -gt 0 && "$1" != "--" ]]; do extra+=("$1"); shift; done
+  shift
   local tty=()
   [[ -t 0 && -t 1 ]] && tty=(-it)
   ensure_image
   docker run --rm "${tty[@]}" --platform linux/amd64 \
-    -v "$ROOT":/workspaces/score \
-    -v "$CACHE_VOL":/root/.cache \
-    -w "/workspaces/score/$workdir" \
-    -e HOME=/root \
-    "$IMAGE" "$@"
+    -v "$SRC_VOL":/work -v "$CACHE_VOL":/root/.cache \
+    -e HOME=/root -w /work/reference_integration \
+    "${extra[@]}" "$IMAGE" "$@"
 }
 
-# Shell snippet: resolves the aarch64 sysroot matching the Bazel GCC toolchain's glibc.
-SYSROOT_SNIPPET='SYS=$(echo /root/.cache/bazel/_bazel_root/*/external/score_bazel_cpp_toolchains++gcc+score_gcc_aarch64_toolchain_pkg/aarch64-unknown-linux-gnu/sysroot)'
+# Make the clone in the volume match the commit the submodule points to.
+sync_source() {
+  local sha url
+  sha="$(GIT_MASTER=1 git -C "$ROOT" ls-files -s reference_integration | awk '{print $2}')"
+  url="$(GIT_MASTER=1 git config -f "$ROOT/.gitmodules" submodule.reference_integration.url)"
+  [[ -n "$sha" && -n "$url" ]] || { echo "reference_integration submodule not found" >&2; exit 1; }
+  docker_run -w /work -- bash -c '
+    set -e
+    export GIT_MASTER=1
+    if [ ! -d reference_integration/.git ]; then
+      git init -q reference_integration
+      git -C reference_integration remote add origin "'"$url"'"
+    fi
+    cd reference_integration
+    if [ "$(git rev-parse -q --verify HEAD || true)" != "'"$sha"'" ]; then
+      git fetch -q --depth 1 origin "'"$sha"'"
+      git checkout -q --detach "'"$sha"'"
+    fi
+    echo "reference_integration at $(git rev-parse --short HEAD)"'
+}
 
 case "${1:-}" in
-  "")  run inc_diagnostics bash ;;
-  pi)  run inc_diagnostics bazel build --config=$CFG //examples/... //score/... "${@:2}" ;;
-  qemu)
-       [[ $# -ge 2 ]] || { echo "usage: $0 qemu <path under bazel-bin> [args]" >&2; exit 2; }
-       bin="$2"; shift 2
-       run inc_diagnostics bash -c "$SYSROOT_SNIPPET; exec qemu-aarch64 -L \"\$SYS\" \"bazel-bin/$bin\" \"\$@\"" _ "$@" ;;
-  qemu-test)
-       run inc_diagnostics bash -c "$SYSROOT_SNIPPET"'
-         rc=0
-         for t in $(bazel query "kind(cc_test, //score/...)" 2>/dev/null | sed "s#^//##; s#:#/#"); do
-           echo "== $t"; qemu-aarch64 -L "$SYS" "bazel-bin/$t" 2>&1 | tail -3 || rc=1
-         done; exit $rc' ;;
-  *)   repo="$1"; shift; run "$repo" "${@:-bash}" ;;
+  build-pi)
+    sync_source
+    mkdir -p "$OUT_DIR"
+    docker_run -v "$OUT_DIR":/out -- bash -c '
+      set -e
+      bazel build --config=linux-aarch64 //deploy:platform_tar //showcases:showcases_pkg_tar
+      cp -L bazel-bin/deploy/platform_tar.tar /out/score-platform-linux-aarch64.tar
+      cp -L bazel-bin/showcases/showcases_pkg_tar.tar /out/score-showcases-linux-aarch64.tar'
+    echo "Raspberry Pi packages: $OUT_DIR"
+    ;;
+  build-qemu)
+    sync_source
+    docker_run -- bazel build --config=eb-aarch64 //images/ebclfsa_aarch64:image
+    ;;
+  run-qemu)
+    sync_source
+    # Ports are published on the loopback interface only: the image allows passwordless root SSH.
+    docker_run -p 127.0.0.1:2222:2222 -p 127.0.0.1:3333:3333 -- \
+      bazel run --config=eb-aarch64 //images/ebclfsa_aarch64:run
+    ;;
+  -h|--help|help) usage 0 ;;
+  *) usage 2 ;;
 esac
