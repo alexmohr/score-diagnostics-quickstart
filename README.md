@@ -1,43 +1,51 @@
-# S-CORE workspace
+# S-CORE diagnostics quickstart
 
-Local workspace for Eclipse S-CORE with the diagnostics stack, cross-built for Raspberry Pi (aarch64) and runnable under QEMU.
+Eclipse S-CORE with the diagnostics stack (OpenSOVD gateway and classic diagnostic adapter), built for Raspberry Pi and for a QEMU VM.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `inc_diagnostics/` | Diagnostics stack: UDS/DTC middleware (`score/mw/diag`), OpenSOVD gateway, classic diagnostic adapter, SOVD client. Bazel module `score_diagnostics`. |
-| `reference_integration/` | Full S-CORE Bazel integration (baselibs, communication, persistency, ...). Has `linux-aarch64`, QNX and AutoSD configs. Not built yet. |
+| `reference_integration/` | S-CORE integration. Submodule, on branch `feat/add-diagnostics` ([PR #482](https://github.com/eclipse-score/reference_integration/pull/482), draft), which deploys the diagnostics with the platform. |
+| `inc_diagnostics/` | Diagnostics stack. Submodule, on branch `consumable_by_reference_integration` ([PR #70](https://github.com/eclipse-score/inc_diagnostics/pull/70), draft), which makes it consumable by other Bazel modules. |
 | `score/` | Docs and process repo. Nothing to build. |
-| `dev.sh`, `Dockerfile` | Build environment wrapper (see below). |
+| `dev.sh` | The three build and run commands (below). |
+| `ecu-sim.sh` | Starts the CDA's ECU simulator and tests the built CDA against it (below). |
 
-The three repos are shallow clones (`--depth 1`). `inc_diagnostics` has local, uncommitted changes: an aarch64 GCC toolchain in `MODULE.bazel` and a `score_diag_aarch64_linux` config in `.bazelrc`.
-
-## Build environment
-
-The hermetic toolchains (GCC 12.2, Ferrocene Rust) only run on x86_64 Linux. `dev.sh` runs the official S-CORE devcontainer as `linux/amd64` in Docker, so it is emulated and slow on Apple Silicon. The Bazel cache lives in the Docker volume `score-bazel-cache`.
-
-Requirements: Docker Desktop with at least 8 GB RAM.
+Clone with `git clone --recurse-submodules`. The submodule pins decide what gets built.
 
 ## Commands
 
 ```sh
-./dev.sh pi                                         # cross-build for Raspberry Pi (first run ~15 min)
-./dev.sh qemu score/mw/diag/future_test             # run one aarch64 binary under qemu-user
-./dev.sh qemu score/opensovd-core/opensovd-gateway  # gateway listens on 127.0.0.1:7690
-./dev.sh qemu-test                                  # run all aarch64 C++ unit tests under qemu-user
-./dev.sh                                            # shell in inc_diagnostics/ inside the container
-./dev.sh reference_integration <cmd>                # run any command in another repo
+./dev.sh build-pi     # Raspberry Pi packages -> out/score-platform-linux-aarch64.tar, out/score-showcases-linux-aarch64.tar
+./dev.sh build-qemu   # QEMU image (EB corbos Linux for Safety Applications, aarch64), ~30 min the first time
+./dev.sh run-qemu     # boot it; SSH on 127.0.0.1:2222 as root, password linux
 ```
 
-Paths after `qemu` are relative to `inc_diagnostics/bazel-bin/`.
+The diagnostics end up in `/usr/bin/diagnostics/` (`opensovd-gateway`, `opensovd-cda`).
 
-## Deploying to a Raspberry Pi
+```sh
+./ecu-sim.sh up       # build and start the CDA's ECU simulator (Docker network score-ecu-sim)
+./ecu-sim.sh test     # run the CDA from the build-pi output against it, read the VIN of ECU flxc1000 over SOVD
+./ecu-sim.sh down
+```
 
-Copy `opensovd-gateway`, `opensovd-cda` and `sovd-client` from `inc_diagnostics/bazel-bin/` to a Pi running 64-bit Raspberry Pi OS (glibc 2.31 or newer).
+The simulator, its ECU databases and the CDA configuration come from the CDA commit that `inc_diagnostics` pins. `test` runs the aarch64 CDA binary natively in an arm64 container, so it needs `./dev.sh build-pi` first.
 
-## Notes
+For the Pi, install the two tars on Raspberry Pi OS Lite (64-bit) as described in `reference_integration/deploy/README.md`.
 
-- QEMU here means user-mode emulation against the build's own sysroot, not a full VM. `qemu-system-aarch64` is in the image if you want to boot one.
-- The Rust tests and integration tests have not been run.
-- Diagnostics is not yet listed in `reference_integration/known_good.json`.
+## How it builds
+
+The hermetic toolchains only run on x86_64 Linux, so `dev.sh` builds in the official devcontainer as `linux/amd64` (emulated and slow on Apple Silicon), extended with the aarch64 glibc headers that the Pi build needs. It requires Docker Desktop with at least 8 GB RAM.
+
+`reference_integration` cannot be checked out completely on a case-insensitive macOS volume (a `BUILD` file and a `build/` directory share a name). `dev.sh` therefore builds from a clone in the Docker volume `score-ref-int` that it keeps in sync with the submodule pin. Bazel's cache is in the volume `score-bazel-cache`.
+
+## Status
+
+- Built and verified: `build-pi`, `build-qemu`, and `run-qemu` boot the VM. The gateway starts inside it and listens on `127.0.0.1:7690`.
+- Not done: the adapter is deployed but not started or configured (it needs a DoIP ECU). Nothing starts the gateway at boot.
+- QEMU runs without KVM or HVF here, so the VM is slow.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE). The submodules have their own licenses.
