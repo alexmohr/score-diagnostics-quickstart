@@ -28,9 +28,10 @@ Usage: ./ecu-sim.sh <command>
          read the VIN of the ECU flxc1000 through the gateway (127.0.0.1:7690). The CDA is only
          reachable through the gateway. This does not use the QEMU image.
   test-vm
-         with the VM of ./dev.sh run-qemu running on the same network: start the CDA and the gateway
-         of the image in it and read the same VIN through the gateway of the VM (172.42.1.100:7690),
-         from a container on the network. The CDA must not be reachable directly.
+         with the VM of ./dev.sh run-qemu running on the same network: wait for the diagnostics service
+         of the image (the CDA and the gateway, started at boot) and read the same VIN through the
+         gateway of the VM (172.42.1.100:7690), from a container on the network. The CDA must not be
+         reachable directly.
   down   stop and remove everything this script started
 
 The simulator, its ECU databases and the settings that its ECUs need come from the CDA commit that
@@ -154,8 +155,8 @@ TOML
   echo "OK: the gateway forwarded to the CDA, which read the VIN of a simulated ECU"
 }
 
-# The OpenSOVD stack of the image: starts the CDA and the gateway in the VM of ./dev.sh run-qemu and
-# reads the VIN of an ECU of the simulator through the gateway, from a container on the network.
+# The OpenSOVD stack of the image: waits for the diagnostics service in the VM of ./dev.sh run-qemu
+# and reads the VIN of an ECU of the simulator through the gateway, from a container on the network.
 vm_test() {
   local image="${SCORE_DEV_IMAGE:-score-dev:aarch64-sim}" base="http://$VM_IP:7690/sovd/v1" vin
   docker image inspect "$image" >/dev/null 2>&1 || { echo "run ./dev.sh build-qemu first ($image is its devcontainer)" >&2; exit 1; }
@@ -163,11 +164,9 @@ vm_test() {
   on_net() { docker run --rm -i --platform linux/amd64 --network "$NET" "$image" "$@"; }
   echo "waiting for the VM on $VM_IP (start it with ./dev.sh run-qemu)"
   wait_for 1800 "the VM" on_net bash -c "exec 3<>/dev/tcp/$VM_IP/22"
-  # The launch manager of the showcase starts the CDA, which listens on the loopback address of the
-  # VM, and then the gateway, which listens on all addresses: clients use the gateway.
-  on_net ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "root@$VM_IP" "
-    killall launch_manager opensovd-cda opensovd-gateway 2>/dev/null
-    cd /showcases/data/diagnostics && (nohup /usr/bin/launch_manager >/tmp/launch_manager.log 2>&1 &)"
+  # The image starts the diagnostics service at boot: the launch manager starts the CDA, which listens
+  # on the loopback address of the VM, and then the gateway, which listens on all addresses.
+  wait_for 600 "the diagnostics service in the VM" on_net bash -c "curl -sf '$base/apps' | grep -q sovd2uds"
   # The ECUs are found by DoIP broadcast from the VM, so give the CDA a moment.
   wait_for 120 "the simulated ECUs through the gateway in the VM" on_net bash -c "curl -sf '$base/components' | grep -q flxc1000"
   echo "components (through the gateway in the VM): $(on_net curl -sf "$base/components")"
