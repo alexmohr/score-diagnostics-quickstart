@@ -19,32 +19,33 @@ Clone with `git clone --recurse-submodules`. The submodules are pinned to commit
 ```sh
 ./dev.sh build-pi     # Raspberry Pi packages -> out/score-platform-linux-aarch64.tar, out/score-showcases-linux-aarch64.tar
 ./dev.sh build-qemu   # QEMU image (EB corbos Linux for Safety Applications, aarch64), ~30 min the first time
-./dev.sh run-qemu     # boot it; SSH on 127.0.0.1:2222 as root, password linux
+./dev.sh run-qemu     # boot it as a host on the Docker network of the simulator; ssh root@172.42.1.100 (no password)
 ```
 
-The diagnostics end up in `/usr/bin/diagnostics/` (`opensovd-gateway`, `opensovd-cda`).
+The diagnostics end up in `/usr/bin/diagnostics/` (`opensovd-gateway`, `opensovd-cda`). The showcase `Diagnostics Stack` (`/showcases/data/diagnostics`) starts them with the launch manager.
 
 ```sh
-./ecu-sim.sh up       # build and start the CDA's ECU simulator (Docker network score-ecu-sim)
-./ecu-sim.sh test     # run the CDA from the build-pi output against it, read the VIN of ECU flxc1000 over SOVD
+./ecu-sim.sh up        # build and start the CDA's ECU simulator (Docker network score-ecu-sim)
+./ecu-sim.sh test-vm   # with run-qemu running: start the stack in the VM, read the VIN of ECU flxc1000 through its gateway
+./ecu-sim.sh test      # the same with the packages of build-pi in containers, without the QEMU image
 ./ecu-sim.sh down
 ```
 
-The simulator, its ECU databases and the CDA configuration come from the CDA commit that `inc_diagnostics` pins. `test` runs the aarch64 CDA binary natively in an arm64 container, so it needs `./dev.sh build-pi` first.
+The simulator, its ECU databases and the ECU settings come from the CDA commit that `inc_diagnostics` pins. The VM of `run-qemu` is a host on the simulator's network at `172.42.1.100`: nothing of it is published on the host, the gateway listens on that address (port 7690) and the CDA only on the loopback address of the VM. `test` runs the aarch64 binaries natively in arm64 containers, so it needs `./dev.sh build-pi` first. The gateway has no `/authorize` yet, so the tests send a fixed development token.
 
 For the Pi, install the two tars on Raspberry Pi OS Lite (64-bit) as described in `reference_integration/deploy/README.md`.
 
 ## How it builds
 
-The hermetic toolchains only run on x86_64 Linux, so `dev.sh` builds in the official devcontainer as `linux/amd64` (emulated and slow on Apple Silicon), extended with the aarch64 glibc headers that the Pi build needs. It requires Docker Desktop with at least 8 GB RAM.
+The hermetic toolchains only run on x86_64 Linux, so `dev.sh` builds in the official devcontainer as `linux/amd64` (emulated, so slow on arm64 hosts), extended with the aarch64 glibc headers that the Pi build needs. It requires Docker Desktop with at least 8 GB RAM.
 
-`reference_integration` cannot be checked out completely on a case-insensitive macOS volume (a `BUILD` file and a `build/` directory share a name). `dev.sh` therefore builds from a clone in the Docker volume `score-ref-int` that it keeps in sync with the submodule pin. Bazel's cache is in the volume `score-bazel-cache`.
+`reference_integration` cannot be checked out completely on a case-insensitive file system (a `BUILD` file and a `build/` directory share a name). `dev.sh` therefore builds from a clone in the Docker volume `score-ref-int` that it keeps in sync with the submodule pin. Bazel's cache is in the volume `score-bazel-cache`.
 
 ## Status
 
-- Built and verified: `build-pi`, `build-qemu`, and `run-qemu` boot the VM. The gateway starts inside it and listens on `127.0.0.1:7690`.
-- Not done: the adapter is deployed but not started or configured (it needs a DoIP ECU). Nothing starts the gateway at boot.
-- QEMU runs without KVM or HVF here, so the VM is slow.
+- Verified: `build-pi`, `build-qemu`, `run-qemu` and `./ecu-sim.sh test-vm`: the gateway and the CDA in the VM read the VIN of a simulated ECU, and the CDA is not reachable directly.
+- Not done: nothing starts the stack when the VM boots (the showcase does, `test-vm` starts it over ssh), and the gateway has no authentication.
+- QEMU runs without KVM here, so the VM needs several minutes to boot, and a build next to it can run out of memory.
 
 ## License
 
