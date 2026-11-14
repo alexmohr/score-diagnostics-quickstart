@@ -108,18 +108,19 @@ EOF
   docker run -d --name "$CDA" --platform linux/arm64 --network "$NET" \
     -v "$work":/app:ro -e CDA_CONFIG_FILE=/app/opensovd-cda.toml debian:bookworm-slim \
     sh -c 'exec /app/opensovd-cda --tester-address "$(hostname -i | cut -d" " -f1)"' >/dev/null
-  # The CDA is not published on the host: it is reached only through the gateway, which also issues the tokens.
+  # The CDA is not published on the host: it is reached only through the gateway, which issues the tokens.
 
-  # The gateway in front of the CDA: it forwards what it does not hold to the CDA (--upstream-url).
+  # The gateway in front of the CDA: with SCORE_UPSTREAM_URL it forwards what it does not hold to the CDA.
   docker rm -f "$GATEWAY" >/dev/null 2>&1 || true
   docker run -d --name "$GATEWAY" --platform linux/arm64 --network "$NET" -p 127.0.0.1:7690:7690 \
-    -v "$work":/app:ro debian:bookworm-slim /app/opensovd-gateway --url http://0.0.0.0:7690/sovd \
-    --upstream-url "http://$CDA:20002/vehicle/v15" --upstream-authorize-url "http://$CDA:20002/vehicle/v15" >/dev/null
+    -e SCORE_GATEWAY_ADDRESS=0.0.0.0:7690 -e "SCORE_UPSTREAM_URL=http://$CDA:20002/vehicle/v15" \
+    -v "$work":/app:ro debian:bookworm-slim /app/opensovd-gateway >/dev/null
   local base=http://127.0.0.1:7690/sovd/v1 token components vin
-  wait_for 60 "the gateway and the CDA behind it" curl -sf -o /dev/null -X POST "$base/authorize" -H 'Content-Type: application/json' -d '{"client_id":"test","client_secret":"test"}' || { docker logs --tail 40 "$GATEWAY"; exit 1; }
-  token="$(curl -sf -X POST "$base/authorize" -H 'Content-Type: application/json' \
-    -d '{"client_id":"test","client_secret":"test"}' | sed -E 's/.*"access_token" *: *"([^"]+)".*/\1/')"
-  [[ -n "$token" ]] || { echo "no token from the gateway" >&2; docker logs --tail 40 "$GATEWAY"; exit 1; }
+  wait_for 60 "the gateway and the CDA behind it" bash -c "curl -sf '$base/apps' | grep -q sovd2uds" || { docker logs --tail 40 "$GATEWAY"; exit 1; }
+  # The gateway has no /authorize yet (it answers 404), so no client can get a token. The CDA here runs
+  # in its development mode and accepts any well-formed JWT with sub and exp; this is one. Replace it
+  # by the token of the gateway as soon as the gateway issues tokens.
+  token="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoyMDAwMDAwMDAwfQ.Q0IP5df7FxVEvVDF2v6soF8uh-j_qA-D_tgYTb3ur3g"
   # The ECUs are found by DoIP broadcast, so give the CDA a moment.
   wait_for 60 "the simulated ECUs" bash -c "curl -sf '$base/components' -H 'Authorization: Bearer $token' | grep -q flxc1000"
   components="$(curl -sf "$base/components" -H "Authorization: Bearer $token")"
