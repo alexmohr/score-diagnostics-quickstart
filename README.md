@@ -35,6 +35,34 @@ The simulator, its ECU databases and the ECU settings come from the CDA commit t
 
 The Pi image is built like the QEMU image: the EB corbos toolkit image for the Raspberry Pi 4B with the platform, the showcases and the diagnostics service deployed in it (`//images/ebclfsa_rpi4b:image` in `reference_integration`), so it starts the stack at boot as well. It is for integration tests, not production: root can log in over ssh without a password.
 
+## Network of the Pi image
+
+The Pi image has a static address and no DHCP client or link-local fallback. The base image of EB corbos configures it in `/etc/config/network` (netifd format), and `reference_integration` does not change that:
+
+```
+config device
+    option type  bridge
+    option name  br0
+    list ports  eth0
+    option ipv6  0
+
+config interface lan
+    option device   br0
+    option proto    static
+    option ipaddr   192.168.7.2/24
+    option gateway  192.168.7.1
+    list dns        8.8.8.8
+```
+
+- To reach the Pi, give your machine an address in `192.168.7.0/24` (for example `192.168.7.1/24`) on the interface it is connected to, then `ssh root@192.168.7.2` (no password). The gateway listens on that address, port 7690.
+- There is no `169.254.x.x` address, and IPv6 is disabled (`option ipv6 0`), so there is no `fe80::` address either.
+- To change the address at build time, set `SCORE_PI_ADDRESS` (with prefix length), `SCORE_PI_GATEWAY` (empty for none) and `SCORE_PI_DNS` (comma separated) when you run `dev.sh` or Bazel, for example `SCORE_PI_ADDRESS=10.0.0.20/24 SCORE_PI_GATEWAY=10.0.0.1 ./dev.sh build-pi`. A change rebuilds the image, not the platform. The same variables set the address of the Raspberry Pi OS image of `reference_integration` (`//images/rpios_rpi4b:image`), which uses a NetworkManager profile instead.
+- To change it afterwards, edit `/etc/config/network` over ssh on the running Pi, or in the root partition (the second partition) of the `.wic` file before flashing. `qemu-sim-net.sh` does the latter with `debugfs` for the QEMU image (`172.42.1.100/16`).
+- The image has `netifd`, BusyBox `udhcpc` and `systemd-networkd`, but no `avahi-autoipd`, and `/lib/netifd` holds no protocol scripts. Whether `option proto dhcp` or a link-local fallback works was not tried.
+- The diagnostics service waits for a network address before it starts the stack, so it starts with the static address as well.
+
+The configuration is documented in `images/network/README.md` of `reference_integration`. That change is not in PR #482 yet.
+
 ## How it builds
 
 The hermetic toolchains only run on x86_64 Linux, so `dev.sh` builds in the official devcontainer as `linux/amd64` (emulated, so slow on arm64 hosts), extended with the aarch64 glibc headers that the Pi build needs. It requires Docker Desktop with at least 8 GB RAM.

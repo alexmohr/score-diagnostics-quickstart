@@ -25,6 +25,12 @@ on x86_64 Linux. reference_integration is built from a clone in the Docker volum
 at the commit that its submodule points to: the repository cannot be checked out completely on a
 case-insensitive file system.
 
+Network of the Raspberry Pi image
+  The image has a static address, 192.168.7.2/24 (gateway 192.168.7.1, DNS 8.8.8.8), no DHCP and no
+  link-local fallback. Set another one when building:
+    SCORE_PI_ADDRESS=10.0.0.20/24 SCORE_PI_GATEWAY=10.0.0.1 SCORE_PI_DNS=10.0.0.1,1.1.1.1 ./dev.sh build-pi
+  To reach the Pi, give the machine connected to it an address in that subnet, then ssh root@<address>.
+
 Network of run-qemu
   The VM is a host on the Docker network score-ecu-sim (172.42.0.0/16, created if it does not exist;
   ./ecu-sim.sh up starts the ECU simulator on it). It gets an address of its own there, 172.42.1.100,
@@ -56,6 +62,11 @@ docker_run() {  # docker_run <extra docker args...> -- <command...>
   shift
   local tty=()
   [[ -t 0 && -t 1 ]] && tty=(-it)
+  # The static network configuration of the Raspberry Pi images, see images/network/README.md.
+  local var
+  for var in SCORE_PI_ADDRESS SCORE_PI_GATEWAY SCORE_PI_DNS; do
+    [[ -z "${!var+x}" ]] || extra+=(-e "$var")
+  done
   ensure_image
   docker run --rm "${tty[@]}" --platform linux/amd64 \
     -v "$SRC_VOL":/work -v "$CACHE_VOL":/root/.cache \
