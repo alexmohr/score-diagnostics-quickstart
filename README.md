@@ -20,16 +20,15 @@ Clone with `git clone --recurse-submodules`. The submodules are pinned to commit
 ./dev.sh build-pi     # S-CORE image for the Raspberry Pi 4B -> out/score-image-rpi4b.wic (flash it to an SD card)
 ./dev.sh build-qemu   # QEMU image (EB corbos Linux for Safety Applications, aarch64), ~30 min the first time
 ./dev.sh run-qemu     # boot it as a host on the Docker network of the simulator; ssh root@172.42.1.100 (no password)
-./dev.sh run-pi       # build the Pi image with the address 172.42.1.101 and boot it in QEMU, the same way
 ```
 
 ## How the test setup works
 
-Everything runs in Docker. The VM of `run-pi` (or `run-qemu`) and the ECU simulator are two hosts on one Docker network, `score-ecu-sim` (`172.42.0.0/16`), so the diagnostics stack in the VM talks to the simulated ECUs the way it would talk to real ones.
+Everything runs in Docker. The VM of `run-qemu` and the ECU simulator are two hosts on one Docker network, `score-ecu-sim` (`172.42.0.0/16`), so the diagnostics stack in the VM talks to the simulated ECUs the way it would talk to real ones.
 
 ```
  macOS
- │  ./dev.sh run-pi, ./ecu-sim.sh up
+ │  ./dev.sh run-qemu, ./ecu-sim.sh up
  │  127.0.0.1:8181 ──────────────┐ (published: simulator control API only)
  │                               │
  └─ Docker Desktop (hidden Linux VM)
@@ -38,14 +37,14 @@ Everything runs in Docker. The VM of `run-pi` (or `run-qemu`) and the ECU simula
     │  ════════╤═════════════════════╤═══════════════════════╤═════════
     │          │                     │                       │
     │  ┌───────┴────────┐  ┌─────────┴───────────────┐  ┌────┴──────────────┐
-    │  │ score-ecu-sim  │  │ run-pi container        │  │ throwaway client  │
+    │  │ score-ecu-sim  │  │ run-qemu container      │  │ throwaway client  │
     │  │ (container)    │  │                         │  │ curl / ssh        │
     │  │                │  │  eth0 ─┐                │  │ docker run --rm   │
     │  │ simulated ECUs │  │        br0 ── tap0      │  │ --network ...     │
     │  │ flxc1000,      │  │                │        │  └───────────────────┘
     │  │ hovr4000, ...  │  │  ┌─────────────┴─────┐  │
     │  │ DoIP :13400    │  │  │ QEMU VM (aarch64) │  │
-    │  │ control :8181  │  │  │ 172.42.1.101      │  │
+    │  │ control :8181  │  │  │ 172.42.1.100      │  │
     │  └────────────────┘  │  │                   │  │
     │                      │  │ gateway  :7690 ◄──┼──┼── SOVD/HTTP from clients
     │                      │  │   │ (VM address)  │  │
@@ -60,14 +59,14 @@ Everything runs in Docker. The VM of `run-pi` (or `run-qemu`) and the ECU simula
 ### The parts
 
 - **ECU simulator** (`./ecu-sim.sh up`): the test simulator of the CDA, built at the CDA commit that `inc_diagnostics` pins. It runs virtual ECUs that speak DoIP (ISO 13400) and UDS (ISO 14229). Its control API on port 8181 is the only thing published on the host.
-- **The `run-pi` container**: the S-CORE devcontainer, used here only to run QEMU. `qemu-sim-net.sh` bridges the container's `eth0` with the VM's tap device, so the VM is a host of its own on the Docker network, not hidden behind the container.
-- **The VM**: the EB corbos Pi image, the one that is flashed to the Pi, built with the address `172.42.1.101/16` (so the network, the CDA and the gateway use it), with the modules of the QEMU kernel added to the copy of its disk that QEMU boots. It boots the EB corbos QEMU kernel, because QEMU cannot run the Pi kernel (see below). Everything in user space is the Pi image. At boot, crinit runs the `diagnostics` task, which starts the S-CORE launch manager. The launch manager starts and supervises the CDA and then the gateway.
+- **The `run-qemu` container**: the S-CORE devcontainer, used here only to run QEMU. `qemu-sim-net.sh` bridges the container's `eth0` with the VM's tap device, so the VM is a host of its own on the Docker network, not hidden behind the container.
+- **The VM**: the EB corbos QEMU image (`//images/ebclfsa_aarch64:image`), with the address `172.42.1.100/16` written into the copy of its disk that QEMU boots. At boot, crinit runs the `diagnostics` task, which starts the S-CORE launch manager. The launch manager starts and supervises the CDA and then the gateway. The Pi images are not booted in QEMU: QEMU cannot run their kernels, and booting them with another kernel would mean changing the images.
 
 ### A request, end to end
 
 `GET /sovd/v1/components/flxc1000/data/VINDataIdentifier`:
 
-1. The client, a container on the network, sends it to the **gateway** at `172.42.1.101:7690`. The gateway is the SOVD server (ISO 17978) and the only diagnostics port that is open.
+1. The client, a container on the network, sends it to the **gateway** at `172.42.1.100:7690`. The gateway is the SOVD server (ISO 17978) and the only diagnostics port that is open.
 2. The gateway forwards what it does not serve itself to the **CDA** at `127.0.0.1:20002`. The CDA is only reachable inside the VM, so clients have to use the gateway.
 3. The CDA looks up the VIN in the ECU database (`.mdd` files) and turns it into a UDS request (ReadDataByIdentifier).
 4. The CDA sends that request over DoIP to the simulated ECU.
@@ -82,20 +81,6 @@ When the CDA starts, it broadcasts a DoIP vehicle identification request on the 
 - Nothing of the VM is forwarded to the host. The VM behaves like a real Pi on a vehicle network: it has an address of its own, is reached over the network, and does not expose the CDA. The host has no route to Docker networks with Docker Desktop, which is why clients run in a container on the network.
 - On the real Pi only the network changes: the Pi is on your Ethernet at `192.168.7.2`, and the CDA finds the DoIP ECUs on that network.
 
-## Booting the Pi image in QEMU
-
-`./dev.sh run-pi` builds the EB corbos Pi image (`//images/ebclfsa_rpi4b:image`) with `SCORE_PI_ADDRESS=172.42.1.101/16` and the gateway of the Docker network, and boots it in QEMU the same way as `run-qemu`: as a host on the Docker network `score-ecu-sim`, at `172.42.1.101`, with nothing published on the host. The image is built with that address rather than changed afterwards, because the address of the gateway is in the binary launch manager configuration (see [Network of the Pi image](#network-of-the-pi-image)). The image stays in Bazel's output; `out/score-image-rpi4b.wic` of `build-pi` is not touched. The next `build-pi` rebuilds the image with its own address.
-
-QEMU cannot run the kernel of the Pi image: its `raspi4b` machine emulates no Ethernet, and the Pi kernel does not get the emulated SD card working (`mmc1: Timeout waiting for hardware interrupt`). The VM therefore boots the kernel of the EB corbos QEMU image (`//images/ebclfsa_aarch64/build:extract-fastdev-image`) on the `virt` machine, with the root file system on the second partition of the Pi image (`root=/dev/vda2`). That kernel loads `virtio_net` and `bridge` as modules, which the Pi image does not have (it has those of the Pi kernel), so `qemu-sim-net.sh` copies `/lib/modules/<version>` of the QEMU image into the copy of the disk as well. Everything in user space is that of the Pi image: `ebclfsa-cflinit`, the crinit tasks, netifd and its network configuration, and the diagnostics service with the launch manager, the CDA and the gateway. What depends on the Pi kernel or the Pi hardware (drivers, `eth0` of the Pi, no RTC) is not covered.
-
-The console of the VM shows the kernel and crinit messages but has no login (the Pi image runs its getty on `ttyS0` and `tty1`, the VM's console is `ttyAMA0`). Log in over ssh (no password) from a container on the network:
-
-```sh
-docker run --rm -it --network score-ecu-sim alpine sh -c 'apk add -q openssh-client && ssh -o StrictHostKeyChecking=no root@172.42.1.101'
-```
-
-The VM is slow without KVM: the diagnostics service is usually up a few minutes after the kernel starts. Stop the VM with `Ctrl-A x` in its console, or by stopping its container.
-
 ## Reaching the gateway
 
 The gateway (OpenSOVD, SOVD over HTTP) listens on port **7690** of the address of the system, under `/sovd/v1`. The CDA behind it listens on the loopback address of the system only (port 20002) and is not reachable from outside.
@@ -103,7 +88,6 @@ The gateway (OpenSOVD, SOVD over HTTP) listens on port **7690** of the address o
 | System | Gateway |
 |---|---|
 | Raspberry Pi | `http://192.168.7.2:7690/sovd/v1` (or the `SCORE_PI_ADDRESS` it was built with) |
-| `./dev.sh run-pi` | `http://172.42.1.101:7690/sovd/v1` |
 | `./dev.sh run-qemu` | `http://172.42.1.100:7690/sovd/v1` |
 
 The gateway has no `/authorize` yet. Listing apps and components works without a token; reading data from an ECU is sent with a fixed development token (the one in `ecu-sim.sh`):
@@ -117,12 +101,12 @@ curl -s http://192.168.7.2:7690/sovd/v1/components
 curl -s http://192.168.7.2:7690/sovd/v1/components/flxc1000/data/VINDataIdentifier -H "Authorization: Bearer $TOKEN"
 ```
 
-The VMs are only on the Docker network, which the host has no route to with Docker Desktop. Run the client on that network:
+The VM is only on the Docker network, which the host has no route to with Docker Desktop. Run the client on that network:
 
 ```sh
-docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.101:7690/sovd/v1/apps
-docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.101:7690/sovd/v1/components
-docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.101:7690/sovd/v1/components/flxc1000/data/VINDataIdentifier -H "Authorization: Bearer $TOKEN"
+docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/apps
+docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/components
+docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/components/flxc1000/data/VINDataIdentifier -H "Authorization: Bearer $TOKEN"
 # {"id":"vindataidentifier","data":{"VIN":"SCEDT26T8BD005261"}}
 ```
 
@@ -171,7 +155,7 @@ config interface lan
   - `/showcases/data/diagnostics/etc/launch_manager_config.bin`: `SCORE_GATEWAY_ADDRESS` of the gateway (for example `192.168.7.2:7690`), so the gateway listens on the address of the image only.
 - If you change the address on the running Pi, change `tester_address` and `tester_subnet` as well. The address of the gateway is in the binary launch manager configuration and needs a new build of the image.
 
-The configuration is documented in `images/network/README.md` of `reference_integration`. That change is not in PR #482 yet.
+The configuration is documented in `images/network/README.md` of `reference_integration`.
 
 ## How it builds
 
@@ -181,7 +165,7 @@ The hermetic toolchains only run on x86_64 Linux, so `dev.sh` builds in the offi
 
 ## Status
 
-- Verified: `build-pi` and `run-pi` (with the simulator: the diagnostics service starts at boot, the gateway listens on `172.42.1.101:7690` only, lists the simulated ECUs and reads the VIN of `flxc1000`, also without a default route; the CDA is not reachable directly). Not verified on a real Raspberry Pi. The Raspberry Pi OS image was only analyzed, not built, after the diagnostics addresses were added.
+- Verified: `build-pi`. Not verified on a real Raspberry Pi. The Raspberry Pi OS image was only analyzed, not built, after the diagnostics addresses were added.
 - Verified: `build-pi`, `build-qemu`, `run-qemu` and `./ecu-sim.sh test-vm`: the gateway and the CDA in the VM read the VIN of a simulated ECU, and the CDA is not reachable directly.
 - Not done: nothing starts the stack when the VM boots (the showcase does, `test-vm` starts it over ssh), and the gateway has no authentication.
 - QEMU runs without KVM here, so the VM needs several minutes to boot, and a build next to it can run out of memory.

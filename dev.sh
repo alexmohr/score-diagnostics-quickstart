@@ -19,8 +19,6 @@ Usage: ./dev.sh <command>
                deployed in it, like the QEMU image. Flash it to an SD card.
   build-qemu   build the QEMU image (EB corbos Linux for Safety Applications, aarch64)
   run-qemu     boot the QEMU image; log in as root over ssh, without a password
-  run-pi       build the Raspberry Pi image with the address 172.42.1.101/16 and boot it in QEMU:
-               its whole user space with the kernel of the QEMU image (see below)
 
 Builds run in the official devcontainer as linux/amd64, because the hermetic toolchains only run
 on x86_64 Linux. reference_integration is built from a clone in the Docker volume score-ref-int,
@@ -42,14 +40,6 @@ Network of run-qemu
     curl http://172.42.1.100:7690/sovd/v1/components   (gateway)
   Where the host has no route to Docker networks (Docker Desktop), run the client on the network:
     docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/components
-
-Network of run-pi
-  The same as run-qemu, at 172.42.1.101 instead. The image is built with that address (the network,
-  the CDA and the gateway follow SCORE_PI_ADDRESS) and stays in Bazel's output, out/ is not touched.
-    docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.101:7690/sovd/v1/components
-  QEMU cannot run the kernel of the Pi image (its raspi4b machine has no Ethernet and cannot read
-  this SD card image), so the VM uses the kernel of the QEMU image. What depends on the Pi kernel or
-  the Pi hardware is not tested this way.
 HELP
   exit "${1:-0}"
 }
@@ -130,13 +120,6 @@ case "${1:-}" in
     # The VM joins the network as a host, see qemu-sim-net.sh. Nothing is published on the host.
     docker_run --cap-add NET_ADMIN --device /dev/net/tun --network "$SIM_NET" \
       -v "$ROOT/qemu-sim-net.sh":/qemu-sim-net.sh:ro -- bash /qemu-sim-net.sh
-    ;;
-  run-pi)
-    sync_source
-    docker network inspect "$SIM_NET" >/dev/null 2>&1 \
-      || docker network create --subnet 172.42.0.0/16 "$SIM_NET" >/dev/null
-    docker_run --cap-add NET_ADMIN --device /dev/net/tun --network "$SIM_NET" \
-      -v "$ROOT/qemu-sim-net.sh":/qemu-sim-net.sh:ro -- bash /qemu-sim-net.sh pi
     ;;
   -h|--help|help) usage 0 ;;
   *) usage 2 ;;
