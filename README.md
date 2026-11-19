@@ -49,7 +49,7 @@ Everything runs in Docker. The VM of `run-qemu` and the ECU simulator are two ho
     │                      │  │ gateway  :7690 ◄──┼──┼── SOVD/HTTP from clients
     │                      │  │   │ (VM address)  │  │
     │                      │  │   ▼               │  │
-    │                      │  │ CDA 127.0.0.1:20002  │
+    │                      │  │ CDA (Unix socket) │  │
     │                      │  │   │ DoIP ─────────┼──┼──► ECUs on the network
     │                      │  │ sshd :22          │  │
     │                      │  └───────────────────┘  │
@@ -67,7 +67,7 @@ Everything runs in Docker. The VM of `run-qemu` and the ECU simulator are two ho
 `GET /sovd/v1/components/flxc1000/data/VINDataIdentifier`:
 
 1. The client, a container on the network, sends it to the **gateway** at `172.42.1.100:7690`. The gateway is the SOVD server (ISO 17978) and the only diagnostics port that is open.
-2. The gateway forwards what it does not serve itself to the **CDA** at `127.0.0.1:20002`. The CDA is only reachable inside the VM, so clients have to use the gateway.
+2. The gateway forwards what it does not serve itself to the **CDA** over the Unix domain socket `/run/opensovd-cda.sock`. The CDA has no TCP port, so clients have to use the gateway.
 3. The CDA looks up the VIN in the ECU database (`.mdd` files) and turns it into a UDS request (ReadDataByIdentifier).
 4. The CDA sends that request over DoIP to the simulated ECU.
 5. The ECU answers, the CDA decodes the bytes into JSON, and the gateway returns it.
@@ -83,7 +83,7 @@ When the CDA starts, it broadcasts a DoIP vehicle identification request on the 
 
 ## Reaching the gateway
 
-The gateway (OpenSOVD, SOVD over HTTP) listens on port **7690** of the address of the system, under `/sovd/v1`. The CDA behind it listens on the loopback address of the system only (port 20002) and is not reachable from outside.
+The gateway (OpenSOVD, SOVD over HTTP) listens on port **7690** of the address of the system, under `/sovd/v1`. The CDA behind it listens on the Unix domain socket `/run/opensovd-cda.sock` only and is not reachable over the network.
 
 | System | Gateway |
 |---|---|
@@ -121,7 +121,7 @@ The diagnostics end up in `/usr/bin/diagnostics/` (`opensovd-gateway`, `opensovd
 ./ecu-sim.sh down
 ```
 
-The simulator, its ECU databases and the ECU settings come from the CDA commit that `inc_diagnostics` pins. The VM of `run-qemu` is a host on the simulator's network at `172.42.1.100`: nothing of it is published on the host, the gateway listens on that address (port 7690) and the CDA only on the loopback address of the VM. `test` runs the aarch64 binaries natively in arm64 containers, so it needs `./dev.sh build-pi` first. The gateway has no `/authorize` yet, so the tests send a fixed development token.
+The simulator, its ECU databases and the ECU settings come from the CDA commit that `inc_diagnostics` pins. The VM of `run-qemu` is a host on the simulator's network at `172.42.1.100`: nothing of it is published on the host, the gateway listens on that address (port 7690) and the CDA only on a Unix domain socket in the VM. `test` runs the aarch64 binaries natively in arm64 containers, so it needs `./dev.sh build-pi` first. The gateway has no `/authorize` yet, so the tests send a fixed development token.
 
 The Pi image is built like the QEMU image: the EB corbos toolkit image for the Raspberry Pi 4B with the platform, the showcases and the diagnostics service deployed in it (`//images/ebclfsa_rpi4b:image` in `reference_integration`), so it starts the stack at boot as well. It is for integration tests, not production: root can log in over ssh without a password.
 

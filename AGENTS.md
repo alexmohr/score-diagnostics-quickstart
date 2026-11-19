@@ -18,7 +18,7 @@ Guidance for coding agents working in this workspace. See `README.md` for the ov
 - `./dev.sh build-pi`, `./dev.sh build-qemu` and `./dev.sh run-qemu` are the only commands. They build the clone in the volume at the commit the `reference_integration` submodule points to. A change to that repo only takes effect after it is pushed and the submodule pin is updated.
 - Run long builds in the background with output redirected to a log file. `build-qemu` takes about 30 minutes the first time. Bazel prints very long progress output, so read only the tail.
 - `./ecu-sim.sh up|test|down` runs the CDA ECU simulator in Docker and tests the CDA from `out/` against it. It clones the CDA at the commit `inc_diagnostics` pins into `out/cda-src`.
-- `run-qemu` publishes nothing on the host: the VM is a host on the Docker network `score-ecu-sim` and is reached by its address (`172.42.1.100`). Never forward its ports to the host, and do not bind its services to `127.0.0.1`: the gateway listens on the address of the VM, the CDA on the loopback address of the VM only, so that clients use the gateway.
+- `run-qemu` publishes nothing on the host: the VM is a host on the Docker network `score-ecu-sim` and is reached by its address (`172.42.1.100`). Never forward its ports to the host, and do not bind its services to `127.0.0.1`: the gateway listens on the address of the VM, the CDA only on the Unix domain socket `/run/opensovd-cda.sock`, so that clients use the gateway.
 - The Bazel cache is in the Docker volume `score-bazel-cache`.
 
 ## Gotchas
