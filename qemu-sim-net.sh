@@ -11,16 +11,20 @@
 # the same kernel and disk as "bazel run //images/ebclfsa_aarch64:run", with the same options except
 # for the network.
 #
-# "qemu-sim-net.sh pi" (./dev.sh run-pi) boots the Raspberry Pi image of ./dev.sh build-pi
-# (/out/score-image-rpi4b.wic) the same way, at 172.42.1.101. QEMU cannot run the kernel of the Pi
-# image: its raspi4b machine has no Ethernet and does not get the SD card of this image working. The
-# VM therefore boots the kernel of the QEMU image with the disk of the Pi image, root file system on
-# its second partition. Everything in user space is that of the Pi image: init, crinit tasks, netifd,
-# the diagnostics service. What depends on the Pi kernel or hardware is not covered.
+# "qemu-sim-net.sh pi" (./dev.sh run-pi) boots the EB corbos Raspberry Pi image the same way, at
+# 172.42.1.101. The image is built with that address (SCORE_PI_ADDRESS): the network, the DoIP tester
+# address of the CDA and the address of the gateway follow it, and the address of the gateway is in
+# the binary launch manager configuration, which a text edit cannot change. QEMU cannot run the
+# kernel of the Pi image: its raspi4b machine has no Ethernet and does not get the SD card of this
+# image working. The VM therefore boots the kernel of the QEMU image with the disk of the Pi image,
+# root file system on its second partition. Everything in user space is that of the Pi image: init,
+# crinit tasks, netifd, the diagnostics service. What depends on the Pi kernel or hardware is not
+# covered.
 set -euo pipefail
 
 MODE="${1:-qemu}"
 VM_MAC=52:54:00:12:34:56
+gateway="$(ip route | awk '/^default/ {print $3}')"
 cd /work/reference_integration
 
 # kernel_and_image <label>: sets kernel and image to the vmlinux and .wic files that <label> builds.
@@ -29,8 +33,8 @@ kernel_and_image() {
   bazel build --config=eb-aarch64 "$1"
   files="$(bazel cquery --config=eb-aarch64 --output=files "$1")"
   # cquery prints bazel-out/<configuration>/bin/<path>, which bazel-bin points to.
-  kernel="bazel-bin/$(grep 'vmlinux$' <<<"$files" | sed 's#^bazel-out/[^/]*/bin/##')"
-  image="bazel-bin/$(grep '\.wic$' <<<"$files" | sed 's#^bazel-out/[^/]*/bin/##')"
+  kernel="bazel-bin/$(grep 'vmlinux$' <<<"$files" | sed 's#^bazel-out/[^/]*/bin/##' || true)"
+  image="bazel-bin/$(grep '\.wic$' <<<"$files" | sed 's#^bazel-out/[^/]*/bin/##' || true)"
 }
 
 case "$MODE" in
@@ -43,8 +47,11 @@ case "$MODE" in
     VM_IP="${VM_IP:-172.42.1.101}"
     # Only the kernel of the toolkit's QEMU image, not the deployed QEMU image.
     kernel_and_image //images/ebclfsa_aarch64/build:extract-fastdev-image
-    qemu_disk="$image"
-    image=/out/score-image-rpi4b.wic
+    qemu_kernel="$kernel" qemu_disk="$image"
+    export SCORE_PI_ADDRESS="$VM_IP/16" SCORE_PI_GATEWAY="$gateway"
+    unset SCORE_PI_DNS
+    kernel_and_image //images/ebclfsa_rpi4b:image
+    kernel="$qemu_kernel"
     root_partition=2
     ;;
   *) echo "usage: qemu-sim-net.sh [qemu|pi]" >&2; exit 2 ;;
@@ -61,7 +68,6 @@ entry = 446 + 16 * (int(sys.argv[2]) - 1)
 print(struct.unpack("<I", open(sys.argv[1], "rb").read(512)[entry + 8:entry + 12])[0] * 512)' "$1" "$2")"
 }
 
-gateway="$(ip route | awk '/^default/ {print $3}')"
 rootfs="$(partition /tmp/vm.wic "$root_partition")"
 
 # The Pi image has the modules of the Pi kernel only, the kernel of the QEMU image loads virtio_net
@@ -84,14 +90,19 @@ if [[ "$MODE" == pi ]]; then
     || { echo "the modules of the QEMU kernel were not written" >&2; exit 1; }
   echo "modules of the QEMU kernel $kver copied into the disk of the VM"
 fi
-# The static address of the image, whatever it was built with, becomes VM_IP; the loopback stays.
-debugfs -R "cat /etc/config/network" "$rootfs" 2>/dev/null \
-  | sed -E -e "/127\.0\.0\.1/! s#(option[[:space:]]+ipaddr[[:space:]]+)[^[:space:]]+#\1$VM_IP/16#" \
-           -e "s#(option[[:space:]]+gateway[[:space:]]+)[^[:space:]]+#\1$gateway#" > /tmp/vm-network
-grep -q "$VM_IP/16" /tmp/vm-network || { echo "cannot set the address of the VM in /etc/config/network" >&2; exit 1; }
-debugfs -w -R "rm /etc/config/network" "$rootfs" >/dev/null 2>&1
-debugfs -w -R "write /tmp/vm-network /etc/config/network" "$rootfs" >/dev/null 2>&1
-debugfs -R "cat /etc/config/network" "$rootfs" 2>/dev/null | grep -q "$VM_IP/16" || { echo "the address of the VM was not written" >&2; exit 1; }
+if [[ "$MODE" == qemu ]]; then
+  # The static address of the image becomes VM_IP; the loopback stays.
+  debugfs -R "cat /etc/config/network" "$rootfs" 2>/dev/null \
+    | sed -E -e "/127\.0\.0\.1/! s#(option[[:space:]]+ipaddr[[:space:]]+)[^[:space:]]+#\1$VM_IP/16#" \
+             -e "s#(option[[:space:]]+gateway[[:space:]]+)[^[:space:]]+#\1$gateway#" > /tmp/vm-network
+  grep -q "$VM_IP/16" /tmp/vm-network || { echo "cannot set the address of the VM in /etc/config/network" >&2; exit 1; }
+  debugfs -w -R "rm /etc/config/network" "$rootfs" >/dev/null 2>&1
+  debugfs -w -R "write /tmp/vm-network /etc/config/network" "$rootfs" >/dev/null 2>&1
+  debugfs -R "cat /etc/config/network" "$rootfs" 2>/dev/null | grep -q "$VM_IP/16" || { echo "the address of the VM was not written" >&2; exit 1; }
+else
+  debugfs -R "cat /etc/config/network" "$rootfs" 2>/dev/null | grep -q "$VM_IP/16" \
+    || { echo "the Pi image was not built with the address of the VM" >&2; exit 1; }
+fi
 
 addr="$(ip -4 -o addr show dev eth0 | awk '{print $4}')"
 ip link add br0 type bridge

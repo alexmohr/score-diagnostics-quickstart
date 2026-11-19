@@ -19,8 +19,8 @@ Usage: ./dev.sh <command>
                deployed in it, like the QEMU image. Flash it to an SD card.
   build-qemu   build the QEMU image (EB corbos Linux for Safety Applications, aarch64)
   run-qemu     boot the QEMU image; log in as root over ssh, without a password
-  run-pi       boot the Raspberry Pi image of build-pi (out/score-image-rpi4b.wic) in QEMU, at
-               172.42.1.101: its whole user space with the kernel of the QEMU image (see below)
+  run-pi       build the Raspberry Pi image with the address 172.42.1.101/16 and boot it in QEMU:
+               its whole user space with the kernel of the QEMU image (see below)
 
 Builds run in the official devcontainer as linux/amd64, because the hermetic toolchains only run
 on x86_64 Linux. reference_integration is built from a clone in the Docker volume score-ref-int,
@@ -44,8 +44,8 @@ Network of run-qemu
     docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/components
 
 Network of run-pi
-  The same as run-qemu, at 172.42.1.101 instead: the address that the image was built with is
-  replaced in the copy of the disk that QEMU boots, out/score-image-rpi4b.wic stays as it is.
+  The same as run-qemu, at 172.42.1.101 instead. The image is built with that address (the network,
+  the CDA and the gateway follow SCORE_PI_ADDRESS) and stays in Bazel's output, out/ is not touched.
     docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.101:7690/sovd/v1/components
   QEMU cannot run the kernel of the Pi image (its raspi4b machine has no Ethernet and cannot read
   this SD card image), so the VM uses the kernel of the QEMU image. What depends on the Pi kernel or
@@ -132,12 +132,10 @@ case "${1:-}" in
       -v "$ROOT/qemu-sim-net.sh":/qemu-sim-net.sh:ro -- bash /qemu-sim-net.sh
     ;;
   run-pi)
-    [[ -f "$OUT_DIR/score-image-rpi4b.wic" ]] || { echo "no $OUT_DIR/score-image-rpi4b.wic, run ./dev.sh build-pi" >&2; exit 1; }
     sync_source
     docker network inspect "$SIM_NET" >/dev/null 2>&1 \
       || docker network create --subnet 172.42.0.0/16 "$SIM_NET" >/dev/null
     docker_run --cap-add NET_ADMIN --device /dev/net/tun --network "$SIM_NET" \
-      -v "$OUT_DIR/score-image-rpi4b.wic":/out/score-image-rpi4b.wic:ro \
       -v "$ROOT/qemu-sim-net.sh":/qemu-sim-net.sh:ro -- bash /qemu-sim-net.sh pi
     ;;
   -h|--help|help) usage 0 ;;
