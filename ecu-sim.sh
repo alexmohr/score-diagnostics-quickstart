@@ -13,6 +13,8 @@ SIM_IMAGE="score-cda-ecu-sim"
 PLATFORM_TAR="$OUT/score-platform-linux-aarch64.tar"
 VM_IP=172.42.1.100  # address of the QEMU VM of ./dev.sh run-qemu on the network of the simulator
 CDA_URL="https://github.com/eclipse-opensovd/classic-diagnostic-adapter.git"
+# Merged PR #766, used only for the native Pi simulator until the CDA pin includes it.
+PI_SIM_COMMIT="2c8efb26b19ce03b4a1f471d98ee115f49662c64"
 
 usage() {
   cat <<'HELP'
@@ -20,6 +22,8 @@ Usage: ./ecu-sim.sh <command>
 
   up     build and start the ECU simulator of the classic diagnostic adapter (CDA), control API on
          127.0.0.1:8181, on the Docker network score-ecu-sim (172.42.0.0/16)
+  pi     build and run the simulator on the host for a physical Pi (foreground; Java 21 required).
+         Set SIM_NETWORK_INTERFACE and SIM_BROADCAST_ADDRESS for the Pi network; see README.md.
   test   run the gateway and the CDA of the last ./dev.sh build-pi in containers on that network and
          read the VIN of the ECU flxc1000 through the gateway (127.0.0.1:7690). The CDA is only
          reachable through the gateway. This does not use the QEMU image.
@@ -46,7 +50,7 @@ cda_commit() {
 
 fetch_source() {
   local sha
-  sha="$(cda_commit)"
+  sha="${1:-$(cda_commit)}"
   [[ -n "$sha" ]] || { echo "no classic-diagnostic-adapter commit in inc_diagnostics/MODULE.bazel" >&2; exit 1; }
   if [[ ! -d "$SRC/.git" ]]; then
     mkdir -p "$SRC"
@@ -54,10 +58,43 @@ fetch_source() {
     GIT_MASTER=1 git -C "$SRC" remote add origin "$CDA_URL"
   fi
   if [[ "$(GIT_MASTER=1 git -C "$SRC" rev-parse -q --verify HEAD || true)" != "$sha" ]]; then
+    [[ -z "$(GIT_MASTER=1 git -C "$SRC" status --porcelain)" ]] || {
+      echo "simulator source in $SRC has local changes; not switching commits" >&2
+      return 1
+    }
     GIT_MASTER=1 git -C "$SRC" fetch -q --depth 1 origin "$sha"
     GIT_MASTER=1 git -C "$SRC" checkout -q --detach "$sha"
   fi
   echo "classic-diagnostic-adapter at ${sha:0:12}"
+}
+
+# Docker Desktop cannot put a container on the Pi's Ethernet. Build the simulator in Docker,
+# then run its JVM on the host, using a separate source checkout from the pinned CDA databases.
+sim_pi() {
+  local SRC="$OUT/cda-pi-sim-src" image="score-cda-ecu-sim-pi" jar tmp
+  [[ -n "${SIM_NETWORK_INTERFACE:-}" && -n "${SIM_BROADCAST_ADDRESS:-}" ]] || {
+    echo "set SIM_NETWORK_INTERFACE and SIM_BROADCAST_ADDRESS for the Pi network; see README.md" >&2
+    return 1
+  }
+  command -v java >/dev/null 2>&1 || { echo "Java 21 is required on the host" >&2; return 1; }
+  fetch_source "$PI_SIM_COMMIT" || return 1
+  local changes
+  changes="$(GIT_MASTER=1 git -C "$SRC" status --porcelain)" || return 1
+  [[ -z "$changes" ]] || { echo "simulator source in $SRC has local changes; not building it" >&2; return 1; }
+  docker build -q -t "$image" -f "$SRC/testcontainer/ecu-sim/docker/Dockerfile" "$SRC/testcontainer/ecu-sim" >/dev/null || return 1
+  jar="$OUT/cda-pi-ecu-sim-all.jar"
+  tmp="$(mktemp "$OUT/cda-pi-ecu-sim.XXXXXX")"
+  if ! docker run --rm --entrypoint cat "$image" /app/ecu-sim-all.jar > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$jar"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  echo "Starting native simulator on $SIM_NETWORK_INTERFACE (broadcast $SIM_BROADCAST_ADDRESS); Ctrl-C to stop"
+  SIM_NETWORK_INTERFACE="$SIM_NETWORK_INTERFACE" SIM_BROADCAST_ADDRESS="$SIM_BROADCAST_ADDRESS" \
+    java -Djava.net.preferIPv4Stack=true -jar "$jar"
 }
 
 wait_for() {  # wait_for <seconds> <description> <command...>
@@ -228,6 +265,7 @@ down() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   case "${1:-}" in
     up) sim_up ;;
+    pi) sim_pi ;;
     test) cda_test ;;
     test-vm) vm_test ;;
     down) down ;;
