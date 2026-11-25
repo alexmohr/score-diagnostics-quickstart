@@ -12,10 +12,6 @@ GATEWAY="score-gateway"
 SIM_IMAGE="score-cda-ecu-sim"
 PLATFORM_TAR="$OUT/score-platform-linux-aarch64.tar"
 VM_IP=172.42.1.100  # address of the QEMU VM of ./dev.sh run-qemu on the network of the simulator
-# The gateway has no /authorize yet (it answers 404), so no client can get a token. The CDA runs in its
-# development mode and accepts any well-formed JWT with sub and exp; this is one. Replace it by the
-# token of the gateway as soon as the gateway issues tokens.
-DEV_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoyMDAwMDAwMDAwfQ.Q0IP5df7FxVEvVDF2v6soF8uh-j_qA-D_tgYTb3ur3g"
 CDA_URL="https://github.com/eclipse-opensovd/classic-diagnostic-adapter.git"
 
 usage() {
@@ -36,8 +32,8 @@ Usage: ./ecu-sim.sh <command>
 
 The simulator, its ECU databases and the settings that its ECUs need come from the CDA commit that
 inc_diagnostics pins. The CDA finds the simulated ECUs by DoIP broadcast, which needs one layer-2
-network. The gateway has no /authorize yet, so the tests send a fixed development token, which the CDA
-accepts in its development mode.
+network. The tests use jq and obtain a token from the gateway's development /authorize endpoint.
+Its placeholder credentials and authentication are not suitable for production.
 HELP
   exit "${1:-0}"
 }
@@ -65,7 +61,7 @@ fetch_source() {
 }
 
 wait_for() {  # wait_for <seconds> <description> <command...>
-  local limit="$1" what="$2"
+  local limit="$1" what="$2" i
   shift 2
   for ((i = 0; i < limit; i++)); do
     "$@" >/dev/null 2>&1 && return 0
@@ -73,6 +69,40 @@ wait_for() {  # wait_for <seconds> <description> <command...>
   done
   echo "timed out waiting for $what" >&2
   return 1
+}
+
+# request_token <base URL> <curl command...>: curl may run locally or on the Docker network.
+request_token() {
+  local base="$1"
+  shift
+  "$@" --fail --silent --show-error --connect-timeout 2 --max-time 5 \
+    -H 'Content-Type: application/json' --data '{"client_id":"ecu-sim","client_secret":"secret"}' \
+    "$base/authorize" | jq -er '.access_token | select(type == "string" and length > 0)'
+}
+
+wait_for_token() {  # wait_for_token <seconds> <description> <base URL> <curl command...>
+  local limit="$1" what="$2" base="$3" token i
+  shift 3
+  for ((i = 0; i < limit; i++)); do
+    if token="$(request_token "$base" "$@" 2>/dev/null)"; then
+      printf '%s\n' "$token"
+      return 0
+    fi
+    (( i + 1 == limit )) || sleep 1
+  done
+  echo "timed out waiting for $what" >&2
+  return 1
+}
+
+response_contains() {  # response_contains <text> <command...>
+  local expected="$1" response
+  shift
+  response="$("$@")" || return 1
+  [[ "$response" == *"$expected"* ]]
+}
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || { echo "jq is required for the gateway token" >&2; return 1; }
 }
 
 sim_up() {
@@ -90,12 +120,17 @@ sim_up() {
 }
 
 cda_test() {
+  require_jq
   docker inspect -f '{{.State.Running}}' "$SIM" 2>/dev/null | grep -q true || { echo "run ./ecu-sim.sh up first" >&2; exit 1; }
   [[ -f "$PLATFORM_TAR" ]] || { echo "$PLATFORM_TAR not found, run ./dev.sh build-pi first" >&2; exit 1; }
+  local expected actual
+  expected="$(cda_commit)"
+  actual="$(GIT_MASTER=1 git -C "$SRC" rev-parse HEAD 2>/dev/null)" || actual=""
+  [[ -n "$expected" && "$actual" == "$expected" ]] || { echo "simulator source is not at the pinned CDA commit; run ./ecu-sim.sh up" >&2; exit 1; }
 
   # The CDA exactly as the platform package ships it, plus its databases.
-  local work="$OUT/cda-run"
-  rm -rf "$work"
+  local work
+  work="$(mktemp -d "$OUT/cda-run.XXXXXX")"
   mkdir -p "$work/databases"
   tar -xf "$PLATFORM_TAR" -C "$work" '*usr/bin/diagnostics/opensovd-cda' '*usr/bin/diagnostics/opensovd-gateway'
   local name bin
@@ -132,16 +167,18 @@ TOML
     sh -c 'exec /app/opensovd-cda --tester-address "$(hostname -i | cut -d" " -f1)"' >/dev/null
   # The CDA is not published on the host: it is reached only through the gateway, which issues the tokens.
 
-  # The gateway in front of the CDA: with SCORE_UPSTREAM_URL it forwards what it does not hold to the CDA.
+  # The gateway in front of the CDA: with SOVD_UPSTREAM_URL it forwards what it does not hold to the CDA.
   docker rm -f "$GATEWAY" >/dev/null 2>&1 || true
   docker run -d --name "$GATEWAY" --platform linux/arm64 --network "$NET" -p 127.0.0.1:7690:7690 \
-    -e SCORE_GATEWAY_ADDRESS=0.0.0.0:7690 -e "SCORE_UPSTREAM_URL=http://$CDA:20002/vehicle/v15" \
+    -e SOVD_URL=http://0.0.0.0:7690/sovd -e "SOVD_UPSTREAM_URL=http://$CDA:20002/vehicle/v15" \
     -v "$work":/app:ro debian:bookworm-slim /app/opensovd-gateway >/dev/null
   local base=http://127.0.0.1:7690/sovd/v1 token components vin
-  wait_for 60 "the gateway and the CDA behind it" bash -c "curl -sf '$base/apps' | grep -q sovd2uds" || { docker logs --tail 40 "$GATEWAY"; exit 1; }
-  token="$DEV_TOKEN"
+  token="$(wait_for_token 60 "the gateway's authorization endpoint" "$base" curl)" || { docker logs --tail 40 "$GATEWAY"; exit 1; }
+  wait_for 60 "the gateway and the CDA behind it" response_contains sovd2uds \
+    curl -fsS -H "Authorization: Bearer $token" "$base/apps" || { docker logs --tail 40 "$GATEWAY"; exit 1; }
   # The ECUs are found by DoIP broadcast, so give the CDA a moment.
-  wait_for 60 "the simulated ECUs" bash -c "curl -sf '$base/components' -H 'Authorization: Bearer $token' | grep -q flxc1000"
+  wait_for 60 "the simulated ECUs" response_contains flxc1000 \
+    curl -fsS -H "Authorization: Bearer $token" "$base/components"
   components="$(curl -sf "$base/components" -H "Authorization: Bearer $token")"
   echo "components (through the gateway): $components"
   # A component is listed before the CDA has detected the variant of its ECU, so retry the read.
@@ -158,20 +195,23 @@ TOML
 # The OpenSOVD stack of the image: waits for the diagnostics service in the VM of ./dev.sh run-qemu
 # and reads the VIN of an ECU of the simulator through the gateway, from a container on the network.
 vm_test() {
-  local image="${SCORE_DEV_IMAGE:-score-dev:aarch64-sim}" base="http://$VM_IP:7690/sovd/v1" vin
+  require_jq
+  local image="${SCORE_DEV_IMAGE:-score-dev:aarch64-sim}" base="http://$VM_IP:7690/sovd/v1" token vin=""
   docker image inspect "$image" >/dev/null 2>&1 || { echo "run ./dev.sh build-qemu first ($image is its devcontainer)" >&2; exit 1; }
   docker inspect -f '{{.State.Running}}' "$SIM" 2>/dev/null | grep -q true || { echo "run ./ecu-sim.sh up first" >&2; exit 1; }
   on_net() { docker run --rm -i --platform linux/amd64 --network "$NET" "$image" "$@"; }
   echo "waiting for the VM on $VM_IP (start it with ./dev.sh run-qemu)"
   wait_for 1800 "the VM" on_net bash -c "exec 3<>/dev/tcp/$VM_IP/22"
-  # The image starts the diagnostics service at boot: the launch manager starts the CDA, which listens
-  # on the loopback address of the VM, and then the gateway, which listens on all addresses.
-  wait_for 600 "the diagnostics service in the VM" on_net bash -c "curl -sf '$base/apps' | grep -q sovd2uds"
+  # The image starts the CDA on a Unix socket and the gateway on the VM's network address.
+  token="$(wait_for_token 600 "the VM gateway's authorization endpoint" "$base" on_net curl)"
+  wait_for 600 "the diagnostics service in the VM" response_contains sovd2uds \
+    on_net curl -fsS -H "Authorization: Bearer $token" "$base/apps"
   # The ECUs are found by DoIP broadcast from the VM, so give the CDA a moment.
-  wait_for 120 "the simulated ECUs through the gateway in the VM" on_net bash -c "curl -sf '$base/components' | grep -q flxc1000"
-  echo "components (through the gateway in the VM): $(on_net curl -sf "$base/components")"
+  wait_for 120 "the simulated ECUs through the gateway in the VM" response_contains flxc1000 \
+    on_net curl -fsS -H "Authorization: Bearer $token" "$base/components"
+  echo "components (through the gateway in the VM): $(on_net curl -fsS -H "Authorization: Bearer $token" "$base/components")"
   for _ in $(seq 1 30); do
-    vin="$(on_net curl -sf "$base/components/flxc1000/data/VINDataIdentifier" -H "Authorization: Bearer $DEV_TOKEN")" && break
+    vin="$(on_net curl -sf "$base/components/flxc1000/data/VINDataIdentifier" -H "Authorization: Bearer $token")" && break
     sleep 2
   done
   echo "VIN:        $vin"
@@ -185,11 +225,13 @@ down() {
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 
-case "${1:-}" in
-  up) sim_up ;;
-  test) cda_test ;;
-  test-vm) vm_test ;;
-  down) down ;;
-  -h|--help|help) usage 0 ;;
-  *) usage 2 ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+    up) sim_up ;;
+    test) cda_test ;;
+    test-vm) vm_test ;;
+    down) down ;;
+    -h|--help|help) usage 0 ;;
+    *) usage 2 ;;
+  esac
+fi
