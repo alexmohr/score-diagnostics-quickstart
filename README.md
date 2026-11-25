@@ -7,12 +7,12 @@ Eclipse S-CORE with the diagnostics stack (OpenSOVD gateway and classic diagnost
 | Path | What it is |
 |---|---|
 | `reference_integration/` | S-CORE integration. Submodule, pinned to a commit of [PR #482](https://github.com/eclipse-score/reference_integration/pull/482) (draft), which deploys the diagnostics with the platform. |
-| `inc_diagnostics/` | Diagnostics stack. Submodule, pinned to a commit of [PR #70](https://github.com/eclipse-score/inc_diagnostics/pull/70) (draft), which makes it consumable by other Bazel modules. |
+| `inc_diagnostics/` | Diagnostics stack. Submodule, pinned to a commit of [diagnostics main](https://github.com/eclipse-score/diagnostics). |
 | `score/` | Docs and process repo. Nothing to build. |
 | `dev.sh` | The three build and run commands (below). |
 | `ecu-sim.sh` | Starts the CDA's ECU simulator and tests the built CDA against it (below). |
 
-Clone with `git clone --recurse-submodules`. The submodules are pinned to commits, never to a branch, and the pins decide what gets built. Update a pin by checking out the new commit in the submodule and committing it here.
+The submodules are pinned to commits, never to a branch, and the pins decide what gets built. On a case-sensitive file system, clone with `git clone --recurse-submodules`. On a case-insensitive file system, clone the root and initialize `inc_diagnostics` and `score` individually: the `reference_integration` host checkout is incomplete, so `dev.sh` builds it in a Docker volume instead.
 
 ## Commands
 
@@ -90,23 +90,32 @@ The gateway (OpenSOVD, SOVD over HTTP) listens on port **7690** of the address o
 | Raspberry Pi | `http://192.168.7.2:7690/sovd/v1` (or the `SCORE_PI_ADDRESS` it was built with) |
 | `./dev.sh run-qemu` | `http://172.42.1.100:7690/sovd/v1` |
 
-The gateway has no `/authorize` yet. Listing apps and components works without a token; reading data from an ECU is sent with a fixed development token (the one in `ecu-sim.sh`):
+The gateway's development mode issues a token from `POST /sovd/v1/authorize` (ISO 17978-3 §7.23.4). Apps, components and ECU data require it; `/sovd/version-info` is available without one. The example uses `jq` to extract the token.
+
+**Development only:** the placeholder accepts any non-empty credentials and does not verify token signatures. It is not production authentication; see `inc_diagnostics/score/opensovd-core/README.md` for the external-issuer configuration.
 
 ```sh
-TOKEN=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoyMDAwMDAwMDAwfQ.Q0IP5df7FxVEvVDF2v6soF8uh-j_qA-D_tgYTb3ur3g
-
 # The Raspberry Pi, from a machine with an address in 192.168.7.0/24
-curl -s http://192.168.7.2:7690/sovd/v1/apps
-curl -s http://192.168.7.2:7690/sovd/v1/components
-curl -s http://192.168.7.2:7690/sovd/v1/components/flxc1000/data/VINDataIdentifier -H "Authorization: Bearer $TOKEN"
+ROOT_URL=http://192.168.7.2:7690/sovd
+BASE=$ROOT_URL/v1
+TOKEN=$(curl -fsS -H 'Content-Type: application/json' \
+  --data '{"client_id":"tester","client_secret":"secret"}' "$BASE/authorize" | jq -er .access_token)
+curl -fsS "$ROOT_URL/version-info"
+curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/apps"
+curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/components"
+curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/components/flxc1000/data/VINDataIdentifier"
 ```
 
 The VM is only on the Docker network, which the host has no route to with Docker Desktop. Run the client on that network:
 
 ```sh
-docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/apps
-docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/components
-docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/components/flxc1000/data/VINDataIdentifier -H "Authorization: Bearer $TOKEN"
+BASE=http://172.42.1.100:7690/sovd/v1
+TOKEN=$(docker run --rm --network score-ecu-sim curlimages/curl -fsS \
+  -H 'Content-Type: application/json' --data '{"client_id":"tester","client_secret":"secret"}' \
+  "$BASE/authorize" | jq -er .access_token)
+docker run --rm --network score-ecu-sim curlimages/curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/apps"
+docker run --rm --network score-ecu-sim curlimages/curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/components"
+docker run --rm --network score-ecu-sim curlimages/curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/components/flxc1000/data/VINDataIdentifier"
 # {"id":"vindataidentifier","data":{"VIN":"SCEDT26T8BD005261"}}
 ```
 
@@ -116,18 +125,18 @@ The diagnostics end up in `/usr/bin/diagnostics/` (`opensovd-gateway`, `opensovd
 
 ```sh
 ./ecu-sim.sh up        # build and start the CDA's ECU simulator (Docker network score-ecu-sim)
-./ecu-sim.sh test-vm   # with run-qemu running: start the stack in the VM, read the VIN of ECU flxc1000 through its gateway
+./ecu-sim.sh test-vm   # with run-qemu running: wait for the stack, read the VIN of ECU flxc1000 through its gateway
 ./ecu-sim.sh test      # the same with the packages of build-pi in containers, without the QEMU image
 ./ecu-sim.sh down
 ```
 
-The simulator, its ECU databases and the ECU settings come from the CDA commit that `inc_diagnostics` pins. The VM of `run-qemu` is a host on the simulator's network at `172.42.1.100`: nothing of it is published on the host, the gateway listens on that address (port 7690) and the CDA only on a Unix domain socket in the VM. `test` runs the aarch64 binaries natively in arm64 containers, so it needs `./dev.sh build-pi` first. The gateway has no `/authorize` yet, so the tests send a fixed development token.
+The simulator, its ECU databases and the ECU settings come from the CDA commit that `inc_diagnostics` pins. The VM of `run-qemu` is a host on the simulator's network at `172.42.1.100`: nothing of it is published on the host, the gateway listens on that address (port 7690) and the CDA only on a Unix domain socket in the VM. `test` runs the aarch64 binaries in arm64 containers, so it needs `./dev.sh build-pi` first. Both tests require `jq` on the host and obtain a fresh development token from the gateway.
 
 The Pi image is built like the QEMU image: the EB corbos toolkit image for the Raspberry Pi 4B with the platform, the showcases and the diagnostics service deployed in it (`//images/ebclfsa_rpi4b:image` in `reference_integration`), so it starts the stack at boot as well. It is for integration tests, not production: root can log in over ssh without a password.
 
 ## Network of the Pi image
 
-The Pi image has a static address and no DHCP client or link-local fallback. The base image of EB corbos configures it in `/etc/config/network` (netifd format), and `reference_integration` does not change that:
+The Pi image has a static address and no DHCP client or link-local fallback. `reference_integration` generates `/etc/config/network` (netifd format) with these defaults:
 
 ```
 config device
@@ -146,13 +155,13 @@ config interface lan
 
 - To reach the Pi, give your machine an address in `192.168.7.0/24` (for example `192.168.7.1/24`) on the interface it is connected to, then `ssh root@192.168.7.2` (no password). The gateway listens on that address, port 7690.
 - There is no `169.254.x.x` address, and IPv6 is disabled (`option ipv6 0`), so there is no `fe80::` address either.
-- To change the address at build time, set `SCORE_PI_ADDRESS` (with prefix length), `SCORE_PI_GATEWAY` (empty for none) and `SCORE_PI_DNS` (comma separated) when you run `dev.sh` or Bazel, for example `SCORE_PI_ADDRESS=10.0.0.20/24 SCORE_PI_GATEWAY=10.0.0.1 ./dev.sh build-pi`. A change rebuilds the image, not the platform. The same variables set the address of the Raspberry Pi OS image of `reference_integration` (`//images/rpios_rpi4b:image`), which uses a NetworkManager profile instead.
+- To change the address at build time, set `SCORE_PI_ADDRESS` (with prefix length), `SCORE_PI_GATEWAY` (empty for none) and `SCORE_PI_DNS` (comma separated) when you run `dev.sh`, for example `SCORE_PI_ADDRESS=10.0.0.20/24 SCORE_PI_GATEWAY=10.0.0.1 ./dev.sh build-pi`. A change rebuilds the image, not the platform. `SCORE_PI_MDNS` sets the gateway's advertised vehicle identification, or disables mDNS when empty.
 - To change it afterwards, edit `/etc/config/network` over ssh on the running Pi, or in the root partition (the second partition) of the `.wic` file before flashing. `qemu-sim-net.sh` does the latter with `debugfs` for the QEMU image (`172.42.1.100/16`).
 - The image has `netifd`, BusyBox `udhcpc` and `systemd-networkd`, but no `avahi-autoipd`, and `/lib/netifd` holds no protocol scripts. Whether `option proto dhcp` or a link-local fallback works was not tried.
 - The diagnostics service waits for a network address before it starts the stack, so it starts with the static address as well.
 - The diagnostics use the address of the image as well, not the `0.0.0.0` of the generic showcase. The Pi images replace two files of the showcase, built from `SCORE_PI_ADDRESS`:
   - `/showcases/data/diagnostics/opensovd-cda.toml`: `tester_address` and `tester_subnet` of the CDA (for example `192.168.7.2`, `255.255.255.0`). The CDA sends its DoIP vehicle identification from that address. With `0.0.0.0` it needs a route to send it and stops with `Failed to send VIR: ... Network is unreachable` without one, for example with a link-local address and no gateway.
-  - `/showcases/data/diagnostics/etc/launch_manager_config.bin`: `SCORE_GATEWAY_ADDRESS` of the gateway (for example `192.168.7.2:7690`), so the gateway listens on the address of the image only.
+  - `/showcases/data/diagnostics/etc/launch_manager_config.bin`: `SOVD_URL` of the gateway (for example `http://192.168.7.2:7690/sovd`), so the gateway listens on the address of the image only.
 - If you change the address on the running Pi, change `tester_address` and `tester_subnet` as well. The address of the gateway is in the binary launch manager configuration and needs a new build of the image.
 
 The configuration is documented in `images/network/README.md` of `reference_integration`.
@@ -165,9 +174,9 @@ The hermetic toolchains only run on x86_64 Linux, so `dev.sh` builds in the offi
 
 ## Status
 
-- Verified: `build-pi`. Not verified on a real Raspberry Pi. The Raspberry Pi OS image was only analyzed, not built, after the diagnostics addresses were added.
-- Verified: `build-pi`, `build-qemu`, `run-qemu` and `./ecu-sim.sh test-vm`: the gateway and the CDA in the VM read the VIN of a simulated ECU, and the CDA is not reachable directly.
-- Not done: nothing starts the stack when the VM boots (the showcase does, `test-vm` starts it over ssh), and the gateway has no authentication.
+- Verified: `build-pi` at the current pins. It has not been tested on a real Raspberry Pi.
+- Earlier pins were verified with `build-qemu`, `run-qemu` and `./ecu-sim.sh test-vm`; the current pins and token flow have not yet been verified end to end in the VM.
+- The image starts the diagnostics service at boot. Its gateway uses placeholder development authentication, not production authentication.
 - QEMU runs without KVM here, so the VM needs several minutes to boot, and a build next to it can run out of memory.
 
 ## License
