@@ -30,6 +30,7 @@ Network of the Raspberry Pi image
   link-local fallback. Set another one when building:
     SCORE_PI_ADDRESS=10.0.0.20/24 SCORE_PI_GATEWAY=10.0.0.1 SCORE_PI_DNS=10.0.0.1,1.1.1.1 ./dev.sh build-pi
   To reach the Pi, give the machine connected to it an address in that subnet, then ssh root@<address>.
+  SCORE_PI_MDNS sets the advertised vehicle identification, or disables mDNS when empty.
 
 Network of run-qemu
   The VM is a host on the Docker network score-ecu-sim (172.42.0.0/16, created if it does not exist;
@@ -37,9 +38,10 @@ Network of run-qemu
   when it has booted, and finds the simulated ECUs by DoIP broadcast. Nothing of the VM is published on the
   host: reach it by that address, for example
     ssh root@172.42.1.100
-    curl http://172.42.1.100:7690/sovd/v1/components   (gateway)
+    curl http://172.42.1.100:7690/sovd/version-info   (gateway)
   Where the host has no route to Docker networks (Docker Desktop), run the client on the network:
-    docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/v1/components
+    docker run --rm --network score-ecu-sim curlimages/curl -s http://172.42.1.100:7690/sovd/version-info
+  Apps and components require a token from /authorize; see README.md.
 HELP
   exit "${1:-0}"
 }
@@ -64,7 +66,7 @@ docker_run() {  # docker_run <extra docker args...> -- <command...>
   [[ -t 0 && -t 1 ]] && tty=(-it)
   # The static network configuration of the Raspberry Pi images, see images/network/README.md.
   local var
-  for var in SCORE_PI_ADDRESS SCORE_PI_GATEWAY SCORE_PI_DNS; do
+  for var in SCORE_PI_ADDRESS SCORE_PI_GATEWAY SCORE_PI_DNS SCORE_PI_MDNS; do
     [[ -z "${!var+x}" ]] || extra+=(-e "$var")
   done
   ensure_image
@@ -80,6 +82,7 @@ sync_source() {
   sha="$(GIT_MASTER=1 git -C "$ROOT" ls-files -s reference_integration | awk '{print $2}')"
   url="$(GIT_MASTER=1 git config -f "$ROOT/.gitmodules" submodule.reference_integration.url)"
   [[ -n "$sha" && -n "$url" ]] || { echo "reference_integration submodule not found" >&2; exit 1; }
+  # shellcheck disable=SC2016
   docker_run -w /work -- bash -c '
     set -e
     export GIT_MASTER=1
@@ -95,32 +98,34 @@ sync_source() {
     echo "reference_integration at $(git rev-parse --short HEAD)"'
 }
 
-case "${1:-}" in
-  build-pi)
-    sync_source
-    mkdir -p "$OUT_DIR"
-    # The image is built like the QEMU image. The packages are also left in out/ for ecu-sim.sh test.
-    docker_run -v "$OUT_DIR":/out -- bash -c '
-      set -e
-      bazel build --config=linux-aarch64 //deploy:platform_tar //showcases:showcases_pkg_tar
-      cp -L bazel-bin/deploy/platform_tar.tar /out/score-platform-linux-aarch64.tar
-      cp -L bazel-bin/showcases/showcases_pkg_tar.tar /out/score-showcases-linux-aarch64.tar
-      bazel build --config=eb-aarch64 //images/ebclfsa_rpi4b:image
-      cp -L bazel-bin/images/ebclfsa_rpi4b/build/ebcl-rpi4b-deployed/fastdev-trixie-ebclfsa-rpi4b.wic /out/score-image-rpi4b.wic'
-    echo "Raspberry Pi 4B image: $OUT_DIR/score-image-rpi4b.wic"
-    ;;
-  build-qemu)
-    sync_source
-    docker_run -- bazel build --config=eb-aarch64 //images/ebclfsa_aarch64:image
-    ;;
-  run-qemu)
-    sync_source
-    docker network inspect "$SIM_NET" >/dev/null 2>&1 \
-      || docker network create --subnet 172.42.0.0/16 "$SIM_NET" >/dev/null
-    # The VM joins the network as a host, see qemu-sim-net.sh. Nothing is published on the host.
-    docker_run --cap-add NET_ADMIN --device /dev/net/tun --network "$SIM_NET" \
-      -v "$ROOT/qemu-sim-net.sh":/qemu-sim-net.sh:ro -- bash /qemu-sim-net.sh
-    ;;
-  -h|--help|help) usage 0 ;;
-  *) usage 2 ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+    build-pi)
+      sync_source
+      mkdir -p "$OUT_DIR"
+      # The image is built like the QEMU image. The packages are also left in out/ for ecu-sim.sh test.
+      docker_run -v "$OUT_DIR":/out -- bash -c '
+        set -e
+        bazel build --config=linux-aarch64 //deploy:platform_tar //showcases:showcases_pkg_tar
+        cp -L bazel-bin/deploy/platform_tar.tar /out/score-platform-linux-aarch64.tar
+        cp -L bazel-bin/showcases/showcases_pkg_tar.tar /out/score-showcases-linux-aarch64.tar
+        bazel build --config=eb-aarch64 //images/ebclfsa_rpi4b:image
+        cp -L bazel-bin/images/ebclfsa_rpi4b/build/ebcl-rpi4b-deployed/fastdev-trixie-ebclfsa-rpi4b.wic /out/score-image-rpi4b.wic'
+      echo "Raspberry Pi 4B image: $OUT_DIR/score-image-rpi4b.wic"
+      ;;
+    build-qemu)
+      sync_source
+      docker_run -- bazel build --config=eb-aarch64 //images/ebclfsa_aarch64:image
+      ;;
+    run-qemu)
+      sync_source
+      docker network inspect "$SIM_NET" >/dev/null 2>&1 \
+        || docker network create --subnet 172.42.0.0/16 "$SIM_NET" >/dev/null
+      # The VM joins the network as a host, see qemu-sim-net.sh. Nothing is published on the host.
+      docker_run --cap-add NET_ADMIN --device /dev/net/tun --network "$SIM_NET" \
+        -v "$ROOT/qemu-sim-net.sh":/qemu-sim-net.sh:ro -- bash /qemu-sim-net.sh
+      ;;
+    -h|--help|help) usage 0 ;;
+    *) usage 2 ;;
+  esac
+fi
