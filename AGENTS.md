@@ -8,7 +8,7 @@ Guidance for coding agents working in this workspace. See `README.md` for the ov
 
 - The workspace root is a git repo. `reference_integration/`, `inc_diagnostics/` and `score/` are git submodules of the upstream `eclipse-score` repos. Run git commands inside the repo you are changing.
 - `reference_integration/` is pinned to a commit of the draft PR eclipse-score/reference_integration#482. It deploys the OpenSOVD gateway and CDA from `inc_diagnostics` through `//deploy/diagnostics`, and adds them to `//deploy:platform_tar` only (QNX consumes `platform_bundle`).
-- `inc_diagnostics/` is pinned to a commit of the draft PR eclipse-score/inc_diagnostics#70. It is a Bazel module `score_diagnostics`; the source of truth for the diagnostics code.
+- `inc_diagnostics/` is pinned to a commit of the main branch of eclipse-score/diagnostics. It is the Bazel module `score_diagnostics` and the source of truth for the diagnostics code.
 - `reference_integration/` cannot be checked out completely on a case-insensitive file system (case collision between `BUILD` and `build/`). The host checkout is therefore incomplete. Build and edit it from the clone in the Docker volume `score-ref-int`, not from this directory.
 - `score/` is docs only.
 
@@ -25,8 +25,8 @@ Guidance for coding agents working in this workspace. See `README.md` for the ov
 
 - `bazel-out/k8-fastbuild` is the output directory name even for aarch64 builds. Check the ELF header instead: `od -An -tx1 -j18 -N2 <bin>` gives `b7 00` for aarch64 and `3e 00` for x86_64.
 - The Pi build needs `gcc-aarch64-linux-gnu` and `libc6-dev-arm64-cross` (iceoryx2 bindgen reads the aarch64 glibc headers from the host). `dev.sh` adds them on top of the devcontainer.
-- Bazel only honours `git_override` and patches in the root module, so `reference_integration` repeats the overrides and patches for `opensovd_core`, `classic-diagnostic-adapter` and `mbedtls-rs` (see `patches/diagnostics`). Those can go once eclipse-opensovd/opensovd-core#247 is done.
-- `opensovd-gateway` has no `--help`. It starts a server (`127.0.0.1:7690` unless `SCORE_GATEWAY_ADDRESS` is set), so wrap it in `timeout`.
+- Bazel only honours `git_override` and patches in the root module, so `reference_integration` repeats the diagnostics dependency overrides and applies integration compatibility patches (see `patches/diagnostics`).
+- `opensovd-gateway` is the gateway of opensovd-core with the S-CORE entities: `--help` lists its options and `SOVD_*` variables. Without options it serves `http://localhost:7690/sovd` (`SOVD_URL`) and forwards to `SOVD_UPSTREAM_URL`.
 - QEMU runs without KVM or HVF here, so the VM is slow. The `[ELOSD]` errors in the boot log come from the base image.
 - Some Rust build scripts (for example `aws-lc-sys`) produce huge stderr that Bazel skips. This is not an error.
 
