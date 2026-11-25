@@ -207,7 +207,7 @@ The hermetic toolchains only run on x86_64 Linux, so `dev.sh` builds in the offi
 ## Status
 
 - Verified: `build-pi` at the current pins. It has not been tested on a real Raspberry Pi.
-- Earlier pins were verified with `build-qemu`, `run-qemu` and `./ecu-sim.sh test-vm`; the current pins and token flow have not yet been verified end to end in the VM.
+- Verified end to end in the VM: `build-qemu`, `run-qemu` and `./ecu-sim.sh test-vm` at the current pins, including the gateway's development token flow.
 - The image starts the diagnostics service at boot. Its gateway uses placeholder development authentication, not production authentication.
 - QEMU runs without KVM here, so the VM needs several minutes to boot, and a build next to it can run out of memory.
 
