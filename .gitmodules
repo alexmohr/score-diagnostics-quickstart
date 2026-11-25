@@ -1,6 +1,6 @@
 [submodule "inc_diagnostics"]
 	path = inc_diagnostics
-	url = https://github.com/eclipse-score/inc_diagnostics.git
+	url = https://github.com/eclipse-score/diagnostics.git
 [submodule "reference_integration"]
 	path = reference_integration
 	url = https://github.com/eclipse-score/reference_integration.git
