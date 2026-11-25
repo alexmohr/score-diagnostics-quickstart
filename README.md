@@ -24,7 +24,7 @@ The submodules are pinned to commits, never to a branch, and the pins decide wha
 
 ## How the test setup works
 
-Everything runs in Docker. The VM of `run-qemu` and the ECU simulator are two hosts on one Docker network, `score-ecu-sim` (`172.42.0.0/16`), so the diagnostics stack in the VM talks to the simulated ECUs the way it would talk to real ones.
+In the QEMU setup everything runs in Docker. The VM of `run-qemu` and the ECU simulator are two hosts on one Docker network, `score-ecu-sim` (`172.42.0.0/16`), so the diagnostics stack in the VM talks to the simulated ECUs the way it would talk to real ones. The physical Pi setup uses a native simulator instead, as described below.
 
 ```
  macOS
@@ -130,9 +130,29 @@ The diagnostics end up in `/usr/bin/diagnostics/` (`opensovd-gateway`, `opensovd
 ./ecu-sim.sh down
 ```
 
-The simulator, its ECU databases and the ECU settings come from the CDA commit that `inc_diagnostics` pins. The VM of `run-qemu` is a host on the simulator's network at `172.42.1.100`: nothing of it is published on the host, the gateway listens on that address (port 7690) and the CDA only on a Unix domain socket in the VM. `test` runs the aarch64 binaries in arm64 containers, so it needs `./dev.sh build-pi` first. Both tests require `jq` on the host and obtain a fresh development token from the gateway.
+For `up` and the tests, the simulator, its ECU databases and the ECU settings come from the CDA commit that `inc_diagnostics` pins. The VM of `run-qemu` is a host on the simulator's network at `172.42.1.100`: nothing of it is published on the host, the gateway listens on that address (port 7690) and the CDA only on a Unix domain socket in the VM. `test` runs the aarch64 binaries in arm64 containers, so it needs `./dev.sh build-pi` first. Both tests require `jq` on the host and obtain a fresh development token from the gateway.
 
 The Pi image is built like the QEMU image: the EB corbos toolkit image for the Raspberry Pi 4B with the platform, the showcases and the diagnostics service deployed in it (`//images/ebclfsa_rpi4b:image` in `reference_integration`), so it starts the stack at boot as well. It is for integration tests, not production: root can log in over ssh without a password.
+
+### ECU simulator with a physical Raspberry Pi
+
+On macOS, Docker Desktop's network is isolated from the Pi's Ethernet; the `up` container cannot be used directly by the Pi. Instead, `pi` builds the simulator in Docker and runs it **on the Mac** with Java 21. It uses a separate simulator source pinned to the merged [CDA PR #766](https://github.com/eclipse-opensovd/classic-diagnostic-adapter/pull/766); the Pi image's CDA and databases still come from the `inc_diagnostics` pin. This combination has not been verified end to end at the current pins.
+
+Connect the Pi and Mac by Ethernet. For the default Pi address `192.168.7.2/24`, give the Mac's Ethernet interface `192.168.7.1/24` and at least four additional unused addresses in that subnet: the simulator assigns its five DoIP entities to the interface's IPv4 addresses. For example, after configuring `192.168.7.1` in macOS Network Settings, with `PI_IF` set to the actual Ethernet interface (find it with `ifconfig`):
+
+```sh
+PI_IF=en7  # replace with the Pi-facing interface
+for i in 10 11 12 13; do
+  sudo ifconfig "$PI_IF" alias "192.168.7.$i" netmask 255.255.255.0
+done
+SIM_NETWORK_INTERFACE="$PI_IF" SIM_BROADCAST_ADDRESS=192.168.7.255 ./ecu-sim.sh pi
+```
+
+Choose unused addresses; do not use the Pi's address. Check the simulator log's `Assigning entity` lines to confirm that all five entities have distinct Pi-subnet addresses. The simulator runs in the foreground; stop it with Ctrl-C. Remove the example aliases afterwards with `sudo ifconfig "$PI_IF" -alias 192.168.7.10` (and similarly for `.11`–`.13`). The native simulator's control API listens on port 8181 on the host network, not just loopback: use a trusted test network.
+
+`SIM_BROADCAST_ADDRESS` directs the simulator's vehicle announcements to the Pi subnet instead of whichever interface the host chooses for limited broadcast. Use the actual subnet's broadcast address if the Pi network differs. Upstream defaults to `255.255.255.255` when unset, but `pi` requires an explicit address. Directed announcements are for testing and deviate from ISO 13400-2:2025 requirement 8.DoIP-125, which requires limited broadcast.
+
+Start the simulator before booting the Pi, or restart the diagnostics stack on the Pi after the simulator starts. From the Mac, use the Raspberry Pi gateway commands above to list components and read the VIN; the simulator addresses must be reachable over Ethernet. If the interface has extra IPv4 addresses, the simulator may assign those instead: check its log and adjust the interface configuration. `./ecu-sim.sh test` and `test-vm` test the Docker setup, not this native Pi mode.
 
 ## Network of the Pi image
 
