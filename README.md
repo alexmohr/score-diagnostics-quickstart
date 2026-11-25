@@ -154,6 +154,18 @@ Choose unused addresses; do not use the Pi's address. Check the simulator log's 
 
 Start the simulator before booting the Pi, or restart the diagnostics stack on the Pi after the simulator starts. From the Mac, use the Raspberry Pi gateway commands above to list components and read the VIN; the simulator addresses must be reachable over Ethernet. If the interface has extra IPv4 addresses, the simulator may assign those instead: check its log and adjust the interface configuration. `./ecu-sim.sh test` and `test-vm` test the Docker setup, not this native Pi mode.
 
+### Gateway configuration and multiple upstreams
+
+The gateway uses the reference gateway's `SOVD_*` variables and command-line options. `SOVD_URL` includes the listening address and base path: for example, `http://192.168.7.2:7690/diagnostics` serves the API under `/diagnostics/v1`. The images use `/sovd` as the base path.
+
+`SOVD_UPSTREAM_URL` accepts a comma-separated list; `--upstream-url` can also be repeated. For example, a gateway started with the following environment forwards to both the CDA on its Unix socket and a separate app over HTTP:
+
+```sh
+SOVD_UPSTREAM_URL='unix:///run/opensovd-cda.sock:/vehicle/v15,http://127.0.0.1:9000/myapp' opensovd-gateway
+```
+
+The socket and HTTP app must be reachable from the gateway process. The images currently configure only the CDA; adding another upstream to an image requires updating its launch manager configuration and rebuilding it.
+
 ## Network of the Pi image
 
 The Pi image has a static address and no DHCP client or link-local fallback. `reference_integration` generates `/etc/config/network` (netifd format) with these defaults:
